@@ -1,0 +1,26 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=${APP_ENV:-development}
+      - APP_DEBUG=${APP_DEBUG:-false}
+      - DATA_PROVIDER=${DATA_PROVIDER:-demo}
+      - AUTH_ENABLED=${AUTH_ENABLED:-true}
+      - RATE_LIMIT_REQUESTS_PER_MINUTE=${RATE_LIMIT_REQUESTS_PER_MINUTE:-60}
+      - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-["http://localhost:3000"]}
+      - DEFAULT_CAPITAL=${DEFAULT_CAPITAL:-500000}
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_DATA_MODE=${DATA_PROVIDER:-demo}
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
