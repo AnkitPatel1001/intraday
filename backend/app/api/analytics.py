@@ -9,6 +9,18 @@ from app.api.paper import get_engine
 
 router = APIRouter()
 
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell(value: object) -> str:
+    """Neutralize CSV/formula injection, then quote per RFC 4180."""
+    s = "" if value is None else str(value)
+    if s[:1] in _FORMULA_PREFIXES:
+        s = "'" + s
+    if any(c in s for c in (",", '"', "\n", "\r")):
+        s = '"' + s.replace('"', '""') + '"'
+    return s
+
 
 @router.get("/performance")
 async def performance(request: Request):
@@ -57,10 +69,9 @@ async def export_csv(request: Request):
         fill = "" if o.fill_price is None else f"{o.fill_price:.2f}"
         slip = "" if o.fill_price is None else f"{o.slippage:.2f}"
         fees = "" if o.fill_price is None else f"{o.fees:.2f}"
-        lines.append(
-            f"{o.id},{o.symbol},{o.side},{o.order_type},{o.qty},"
-            f"{fill},{slip},{fees},{o.status},{o.tag}"
-        )
+        row = [o.id, o.symbol, o.side, o.order_type, o.qty,
+               fill, slip, fees, o.status, o.tag]
+        lines.append(",".join(_csv_cell(c) for c in row))
     csv = "\n".join(lines)
     from fastapi.responses import PlainTextResponse
     return PlainTextResponse(csv, media_type="text/csv")
