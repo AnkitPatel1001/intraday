@@ -195,11 +195,23 @@ export interface TimeMachineMC {
   p_neither: number;
   p_green: number;
   median_close: number;
+  p5_close?: number;
+  p95_close?: number;
   avg_R: number | null;
   r_at_target: number | null;
   bars_left: number;
   seed: number;
+  replays?: number;
+  count_target?: number;
+  count_stop?: number;
+  count_close?: number;
+  count_reach_target?: number;
+  count_reach_stop?: number;
+  until?: string;
+  window?: number;
   pool_sessions: number;
+  pool_from?: string;
+  pool_to?: string;
 }
 
 export interface TimeMachineHistory {
@@ -209,6 +221,8 @@ export interface TimeMachineHistory {
   stop: number | null;
   close: number | null;
   avg_R: number | null;
+  rule?: Record<string, unknown> | null;
+  note?: string;
 }
 
 export interface TimeMachineResponse {
@@ -218,6 +232,8 @@ export interface TimeMachineResponse {
   verdict: string;
   verdict_notes: string[];
   note?: string;
+  report?: string;
+  warnings?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +265,7 @@ export interface OrderRequest {
   side: Side;
   qty: number;
   order_type: "market" | "limit";
+  price?: number;
 }
 
 export interface Order {
@@ -261,6 +278,7 @@ export interface Order {
   fees: number;
   slippage?: number;
   tag?: string;
+  limit_price?: number | null;
 }
 
 export interface OrderResponse {

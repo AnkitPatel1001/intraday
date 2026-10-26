@@ -7,6 +7,27 @@ import os
 import secrets
 from dataclasses import dataclass, field
 from functools import lru_cache
+from pathlib import Path
+
+
+def load_env_files(backend_dir: Path | None = None) -> None:
+    """Load .env files into os.environ without overriding existing vars.
+
+    Precedence: real shell env > backend/.env > project-root .env.
+    Missing python-dotenv or missing files = no-op.
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    if backend_dir is None:
+        backend_dir = Path(__file__).resolve().parents[2]
+    for path in (backend_dir / ".env", backend_dir.parent / ".env"):
+        if path.is_file():
+            load_dotenv(path, override=False)
+
+
+load_env_files()
 
 
 def _env(key: str, default: str = "") -> str:
@@ -59,6 +80,35 @@ class Settings:
     data_provider: str = field(default_factory=lambda: _env("DATA_PROVIDER", "demo"))
     yahoo_enabled: bool = field(default_factory=lambda: _env_bool("YAHOO_ENABLED", True))
 
+    # Upstox market-data provider (DATA_PROVIDER=upstox).
+    # Data/market-data only — this app never places broker orders (paper only).
+    # Prefer UPSTOX_ANALYTICS_TOKEN (long-lived, no daily refresh) over the
+    # daily OAuth UPSTOX_ACCESS_TOKEN. See README "Free Upstox API key".
+    upstox_api_key: str = field(default_factory=lambda: _env("UPSTOX_API_KEY", ""))
+    upstox_api_secret: str = field(default_factory=lambda: _env("UPSTOX_API_SECRET", ""))
+    upstox_access_token: str = field(default_factory=lambda: _env("UPSTOX_ACCESS_TOKEN", ""))
+    upstox_analytics_token: str = field(
+        default_factory=lambda: _env("UPSTOX_ANALYTICS_TOKEN", "")
+    )
+    upstox_ws_enabled: bool = field(default_factory=lambda: _env_bool("UPSTOX_WS_ENABLED", True))
+    upstox_base_url: str = field(
+        default_factory=lambda: _env("UPSTOX_BASE_URL", "https://api.upstox.com")
+    )
+    # Sandbox-first (default): this app only ever calls read-only market-data
+    # endpoints; Upstox's sandbox (api-sandbox.upstox.com) covers order APIs
+    # only — market data 404s there. Flag is reported in provider health so
+    # the active mode is visible. UPSTOX_BASE_URL overrides the data host.
+    upstox_sandbox: bool = field(default_factory=lambda: _env_bool("UPSTOX_SANDBOX", True))
+    # Upstox allows 50 req/s for quotes/OHLC; stay well under it (no 429s).
+    upstox_rest_max_per_second: int = field(
+        default_factory=lambda: _env_int("UPSTOX_REST_MAX_PER_SECOND", 10)
+    )
+    upstox_instrument_cache: str = field(
+        default_factory=lambda: _env(
+            "UPSTOX_INSTRUMENT_CACHE", "data/upstox_nse_instruments.json"
+        )
+    )
+
     # Backend
     backend_host: str = field(default_factory=lambda: _env("BACKEND_HOST", "0.0.0.0"))
     backend_port: int = field(default_factory=lambda: _env_int("BACKEND_PORT", 8000))
@@ -95,6 +145,11 @@ class Settings:
 
     # Paper trading
     paper_trading_default: bool = True  # ALWAYS True. Live requires explicit override.
+    # Allow placing simulated orders outside NSE session hours (tests, demos).
+    # Default False: real fills only make sense while the market is open.
+    paper_allow_off_hours: bool = field(
+        default_factory=lambda: _env_bool("PAPER_ALLOW_OFF_HOURS", False)
+    )
 
     @property
     def is_production(self) -> bool:

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from app.core.symbols import validate_symbol
 from app.core.timezone import now_ist
 from app.data.factory import get_provider
+from app.api.provider_errors import provider_502
 from app.engine.backtest import run_backtest, orb_strategy
 
 router = APIRouter()
@@ -40,7 +41,7 @@ async def run(req: BacktestRequest):
     try:
         series = await provider.get_bars(sym, req.interval, start, end)
     except Exception as e:
-        raise HTTPException(502, "data provider error")
+        raise provider_502(sym, e) from e
 
     if len(series.candles) < 30:
         raise HTTPException(400, f"insufficient data: {len(series.candles)} bars")
@@ -50,9 +51,20 @@ async def run(req: BacktestRequest):
     else:
         raise HTTPException(400, f"unknown strategy: {req.strategy}")
 
+    # Real benchmark: NIFTY 50 daily over the same window (P-18)
+    benchmark = None
+    try:
+        benchmark = await provider.get_bars("NIFTY50", "1d", start, end)
+    except Exception:
+        benchmark = None
+
     result = await asyncio.to_thread(
-        run_backtest, series, strat, req.capital, req.risk_pct
+        run_backtest, series, strat, req.capital, req.risk_pct, benchmark
     )
+    if benchmark is None:
+        result.warnings.append(
+            "benchmark unavailable: benchmark_return_pct is 0.0 (no NIFTY50 data)"
+        )
     return {
         "symbol": sym,
         "strategy": req.strategy,

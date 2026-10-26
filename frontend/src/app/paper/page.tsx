@@ -19,6 +19,7 @@ export default function PaperTradingPage() {
   const [side, setSide] = useState<"buy" | "sell">("buy");
   const [qty, setQty] = useState("10");
   const [orderType, setOrderType] = useState<"market" | "limit">("market");
+  const [limitPrice, setLimitPrice] = useState("");
   const [placing, setPlacing] = useState(false);
   const [orderMsg, setOrderMsg] = useState<string | null>(null);
   const [orderErr, setOrderErr] = useState<string | null>(null);
@@ -57,12 +58,17 @@ export default function PaperTradingPage() {
         side,
         qty: Number(qty),
         order_type: orderType,
+        ...(orderType === "limit" ? { price: Number(limitPrice) } : {}),
       });
       setPortfolio(res.portfolio);
       setOrderMsg(
-        `Order ${res.order.id} ${res.order.status} @ ${formatINR(
-          res.order.fill_price
-        )} · fees ${formatINR(res.order.fees)}`
+        res.order.fill_price != null
+          ? `Order ${res.order.id} ${res.order.status} @ ${formatINR(
+              res.order.fill_price
+            )} · fees ${formatINR(res.order.fees)}`
+          : `Order ${res.order.id} ${res.order.status} · limit ₹${Number(
+              limitPrice
+            ).toFixed(2)} · resting until price is reached`
       );
       // refresh analytics after fill
       apiGet<PerformanceResponse>("/api/v1/analytics/performance")
@@ -197,6 +203,28 @@ export default function PaperTradingPage() {
                     <option value="limit">Limit</option>
                   </select>
                 </div>
+                {orderType === "limit" ? (
+                  <div>
+                    <label className="label-caps block mb-1.5">
+                      Limit price (₹)
+                    </label>
+                    <input
+                      type="number"
+                      min={0.05}
+                      step="0.05"
+                      className="input-dark num"
+                      value={limitPrice}
+                      onChange={(e) => setLimitPrice(e.target.value)}
+                      placeholder="e.g. 1180.00"
+                      required
+                    />
+                    <div className="text-[11px] text-gray-600 mt-1.5 leading-relaxed">
+                      Fills only when the market reaches this price (buy: at or
+                      below; sell: at or above). Otherwise rests as open until
+                      cancelled.
+                    </div>
+                  </div>
+                ) : null}
                 <button className="btn-primary w-full" disabled={placing}>
                   {placing ? "Submitting…" : "Submit order"}
                 </button>
@@ -215,7 +243,8 @@ export default function PaperTradingPage() {
 
               <div className="text-[11px] text-gray-600 mt-4 leading-relaxed">
                 Market orders fill at the current demo quote (slippage and fees
-                applied by the engine). {portfolio.label}
+                applied by the engine). Limit orders rest until the market
+                reaches the price. {portfolio.label}
               </div>
             </div>
 

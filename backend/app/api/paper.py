@@ -1,4 +1,4 @@
-﻿"""Paper trading endpoints. Simulated only â€” no real money.
+﻿"""Paper trading endpoints. Simulated only - no real money.
 
 Portfolios are isolated per session token (see app/api/auth.py).
 """
@@ -9,8 +9,10 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.api.auth import session_of
+from app.core.calendar import session_status
 from app.core.config import get_settings
 from app.core.symbols import validate_symbol
+from app.core.timezone import now_ist
 from app.data.factory import get_provider
 from app.engine.paper import PaperTradingEngine
 
@@ -41,6 +43,8 @@ class OrderRequest(BaseModel):
     order_type: str = "market"
     price: float | None = None
     tag: str = ""
+    stop: float | None = None
+    target: float | None = None
 
 
 class FlattenRequest(BaseModel):
@@ -71,9 +75,25 @@ async def place_order(req: OrderRequest, request: Request):
         raise HTTPException(400, "tag must be at most 200 characters")
     if req.price is not None and req.price <= 0:
         raise HTTPException(400, "price must be positive")
+    if req.stop is not None and req.stop <= 0:
+        raise HTTPException(400, "stop must be positive")
+    if req.target is not None and req.target <= 0:
+        raise HTTPException(400, "target must be positive")
 
     if req.order_type == "limit" and req.price is None:
         raise HTTPException(400, "limit order requires price")
+
+    # Orders only make sense while the NSE session is open (P-03).
+    settings = get_settings()
+    if not settings.paper_allow_off_hours:
+        now = now_ist()
+        status = session_status(now.date(), now.time())
+        if status != "open":
+            raise HTTPException(
+                400,
+                f"market session is '{status}', not open: "
+                "orders accepted only 09:15-15:30 IST on trading days",
+            )
 
     # Quote is required for market orders; used for crossing checks on limits.
     current_price: float | None = None
@@ -85,19 +105,30 @@ async def place_order(req: OrderRequest, request: Request):
         if req.order_type == "market":
             raise HTTPException(502, "cannot get market price for market order")
 
+    # Protective stop/target must bracket the market (P-05).
+    if current_price is not None and req.side == "buy":
+        if req.stop is not None and req.stop >= current_price:
+            raise HTTPException(400, "stop must be below market for a buy entry")
+        if req.target is not None and req.target <= current_price:
+            raise HTTPException(400, "target must be above market for a buy entry")
+
     e = get_engine(session_of(request))
     order = e.place_order(sym, req.side, req.qty, req.order_type,
-                          req.price, req.tag, current_price)
+                          req.price, req.tag, current_price,
+                          stop=req.stop, target=req.target)
+    if order.status == "rejected":
+        raise HTTPException(400, order.reject_reason or "order rejected")
     return {
         "order": {
             "id": order.id, "symbol": order.symbol, "side": order.side,
             "qty": order.qty, "status": order.status,
             "fill_price": order.fill_price, "fees": order.fees,
             "slippage": order.slippage, "tag": order.tag,
+            "stop": order.stop, "target": order.target,
             "limit_price": order.price if order.order_type == "limit" else None,
         },
         "portfolio": e.snapshot(),
-        "label": "PAPER TRADING â€” simulated, no real money",
+        "label": "PAPER TRADING - simulated, no real money",
     }
 
 
@@ -131,12 +162,25 @@ async def list_orders(request: Request):
                 "id": o.id, "symbol": o.symbol, "side": o.side,
                 "qty": o.qty, "status": o.status,
                 "fill_price": o.fill_price, "limit_price": o.price,
-                "order_type": o.order_type,
+                "order_type": o.order_type, "tag": o.tag,
+                "stop": o.stop, "target": o.target,
                 "created_at": o.created_at.isoformat(),
             }
             for o in e.orders[-50:]
         ],
     }
+
+
+@router.delete("/orders/{order_id}")
+async def cancel_order(order_id: str, request: Request):
+    e = get_engine(session_of(request))
+    order = e.cancel_order(order_id)
+    if order is None:
+        known = any(o.id == order_id for o in e.orders)
+        raise HTTPException(404 if not known else 409,
+                            "unknown order" if not known
+                            else "order is not cancellable")
+    return {"cancelled": True, "order_id": order.id, "status": order.status}
 
 
 @router.get("/audit")

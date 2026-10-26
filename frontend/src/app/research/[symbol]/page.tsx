@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { apiGet } from "@/lib/api";
 import type { BarsResponse, Quote } from "@/lib/types";
 import { formatINR, formatNumber, formatTime, formatVolume } from "@/lib/format";
@@ -102,10 +102,16 @@ function vwap(
 
 export default function ResearchPage() {
   const params = useParams<{ symbol: string }>();
+  const router = useRouter();
   const symbol = useMemo(
     () => decodeURIComponent(params?.symbol ?? "RELIANCE").toUpperCase(),
     [params]
   );
+  const [symInput, setSymInput] = useState("");
+  const goSymbol = (raw: string) => {
+    const s = raw.trim().toUpperCase().replace(/\.NS$|\.BO$/, "");
+    if (s) router.push(`/research/${encodeURIComponent(s)}`);
+  };
 
   const [interval, setInterval_] = useState("5m");
   const [days, setDays] = useState(30);
@@ -205,6 +211,23 @@ export default function ResearchPage() {
                 )}`
               : "loading price action…"}
           </p>
+          <form
+            className="flex items-center gap-2 mt-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              goSymbol(symInput);
+            }}
+          >
+            <input
+              className="input-dark num w-40 py-1.5 text-xs"
+              placeholder="e.g. TONBO, SILVERBEES"
+              value={symInput}
+              onChange={(e) => setSymInput(e.target.value)}
+            />
+            <button type="submit" className="btn-ghost text-xs">
+              Go
+            </button>
+          </form>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {bars ? (

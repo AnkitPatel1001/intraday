@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 
 from fastapi import APIRouter, HTTPException, Query
@@ -12,6 +13,7 @@ from app.core.primitives import DataFreshness
 from app.core.symbols import validate_symbol, NIFTY50, SECTOR_MAP
 from app.core.timezone import now_ist, to_ist
 from app.data.factory import get_provider, staleness
+from app.api.provider_errors import provider_502
 
 router = APIRouter()
 
@@ -30,40 +32,44 @@ async def holidays(year: int | None = None):
 
 @router.get("/indices")
 async def indices():
-    """Demo index overview. Synthetic data unless live provider configured."""
+    """Index overview from the active provider (works for demo + live data)."""
     provider = get_provider()
+    syms = ("NIFTY50", "BANKNIFTY", "FINNIFTY", "NIFTYMIDCAP")
+    results = await asyncio.gather(
+        *(provider.get_quote(s) for s in syms), return_exceptions=True
+    )
     out = []
-    for idx in ("NIFTY50", "BANKNIFTY", "FINNIFTY", "NIFTYMIDCAP"):
-        try:
-            q = await provider.get_quote(idx)
+    for idx, res in zip(syms, results):
+        if isinstance(res, Exception):
+            out.append({"symbol": idx, "error": "no data"})
+        else:
             out.append({
                 "symbol": idx,
-                "last_price": q.last_price,
-                "freshness": q.freshness.value,
-                "source": q.source,
-                "label": q.freshness.value,
+                "last_price": res.last_price,
+                "freshness": res.freshness.value,
+                "source": res.source,
+                "label": res.freshness.value,
             })
-        except Exception:
-            out.append({"symbol": idx, "error": "no data"})
     return {"indices": out, "as_of": now_ist().isoformat()}
 
 
 @router.get("/sectors")
 async def sectors():
-    """Sector performance from demo universe."""
+    """Sector performance from demo universe (batch quotes, one round)."""
     provider = get_provider()
-    sectors: dict[str, list[dict]] = {}
+    syms = list(SECTOR_MAP)
+    quotes = await provider.get_batch_quotes(syms)
+    groups: dict[str, list[dict]] = {}
     for sym, sector in SECTOR_MAP.items():
-        try:
-            q = await provider.get_quote(sym)
-            sectors.setdefault(sector, []).append({
-                "symbol": sym, "price": q.last_price,
-                "freshness": q.freshness.value,
-            })
-        except Exception:
-            pass
+        q = quotes.get(sym)
+        if q is None:
+            continue
+        groups.setdefault(sector, []).append({
+            "symbol": sym, "price": q.last_price,
+            "freshness": q.freshness.value,
+        })
     out = []
-    for sector, stocks in sectors.items():
+    for sector, stocks in groups.items():
         avg = sum(s["price"] for s in stocks) / len(stocks) if stocks else 0
         out.append({"sector": sector, "avg_price": round(avg, 2), "count": len(stocks)})
     return {"sectors": out}
@@ -79,13 +85,28 @@ async def get_bars(
         sym = validate_symbol(symbol)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+    # Payload cap: refuse requests that would return >10000 bars (P-15).
+    # 10000 bars ~= 1.2MB JSON; blocks 1m-for-a-year (~9.8MB) requests while
+    # allowing 5m x 133 days (time-machine workflows need ~90d of 5m bars).
+    bars_per_day = {"1m": 375, "5m": 75, "15m": 25, "1d": 2}
+    max_bars = 10000
+    estimated = bars_per_day[interval] * days
+    if estimated > max_bars:
+        allowed_days = max_bars // bars_per_day[interval]
+        raise HTTPException(
+            422,
+            f"too many bars: {interval} over {days} days is about "
+            f"{estimated} (limit {max_bars}); use at most {allowed_days} days",
+        )
+
     provider = get_provider()
     end = now_ist().date()
     start = end - datetime.timedelta(days=days)
     try:
         series = await provider.get_bars(sym, interval, start, end)
     except Exception as e:
-        raise HTTPException(502, "data provider error")
+        raise provider_502(sym, e) from e
     return {
         "symbol": sym,
         "interval": interval,
@@ -116,7 +137,7 @@ async def get_quote(symbol: str):
     try:
         q = await provider.get_quote(sym)
     except Exception as e:
-        raise HTTPException(502, "quote provider error")
+        raise provider_502(sym, e) from e
     return {
         "symbol": q.symbol, "exchange": q.exchange,
         "last_price": q.last_price, "volume": q.volume,
@@ -154,8 +175,8 @@ async def circuit_bands(symbol: str = Query("NIFTY50")):
     try:
         series = await provider.get_bars(sym, "1d", start, end)
         quote = await provider.get_quote(sym)
-    except Exception:
-        raise HTTPException(502, "data provider error")
+    except Exception as e:
+        raise provider_502(sym, e) from e
 
     closes = [c.close for c in series.candles]
     if not closes:

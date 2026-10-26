@@ -130,7 +130,7 @@ class TestPaperTradingWorkflow:
             perf_r = await c.get("/api/v1/analytics/performance")
             assert perf_r.status_code == 200
             perf = perf_r.json()
-            assert perf["trade_count"] >= 1  # the buy entry
+            assert perf["trade_count"] == 2  # entry fill + exit fill
             assert perf["closed_count"] >= 1  # the round trip closed
 
     async def test_portfolio_survives_multiple_trades(self):
@@ -145,7 +145,7 @@ class TestPaperTradingWorkflow:
                 })
             pf_r = await c.get("/api/v1/paper/portfolio")
             pf = pf_r.json()
-            assert pf["trades"] == 3  # 3 buy entries (buys increment trade count)
+            assert pf["trades"] == 6  # 3 round trips = 6 fills (buy + sell each)
 
     async def test_audit_log_records_every_action(self):
         async with AsyncClient(transport=transport, base_url="http://test") as c:

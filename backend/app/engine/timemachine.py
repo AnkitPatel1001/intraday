@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime
 import math
 import random
+import re
 import statistics
 
 from app.core.calendar import (
@@ -117,10 +118,14 @@ def simulate(
     closes: list[float] = []
     paths: list[list[float]] = []
     Rs: list[float] = []
+    reach_target = 0
+    reach_stop = 0
 
     for n in range(replays):
         p = entry
         outcome = None
+        touched_t = False
+        touched_s = False
         keep = n < SAMPLE_PATHS
         path = [entry]
         for i in range(k + 1, last + 1):
@@ -129,6 +134,18 @@ def simulate(
                 slot_choices = pool[i] if pool[i] else [(1, 1, 1, 1)]
             o_r, h_r, l_r, c_r = choice(slot_choices)
             hi, lo, cl = p * h_r, p * l_r, p * c_r
+            # Reach = any touch of the level during the session, even after
+            # the first-hit outcome is decided (user-facing "price went to X").
+            if long:
+                if hi >= target:
+                    touched_t = True
+                if lo <= stop:
+                    touched_s = True
+            else:
+                if lo <= target:
+                    touched_t = True
+                if hi >= stop:
+                    touched_s = True
             if outcome is None:
                 if long:
                     if lo <= stop:
@@ -143,6 +160,8 @@ def simulate(
             p = cl
             if keep:
                 path.append(round(p, 2))
+        reach_target += 1 if touched_t else 0
+        reach_stop += 1 if touched_s else 0
         final_outcome = outcome or "close"
         outcomes.append(final_outcome)
         closes.append(p)
@@ -191,6 +210,9 @@ def simulate(
     return {
         "replays": replays, "seed": seed, "window": window,
         "bars_left": last - k,
+        "count_target": cnt["target"], "count_stop": cnt["stop"],
+        "count_close": cnt["close"],
+        "count_reach_target": reach_target, "count_reach_stop": reach_stop,
         "p_target": round(cnt["target"] / replays, 4),
         "p_stop": round(cnt["stop"] / replays, 4),
         "p_neither": round(cnt["close"] / replays, 4),
@@ -264,7 +286,8 @@ def history_replay(
             -1.0 if oc == "stop" else ((cl - e) if long else (e - cl)) / risk
         )
         trades.append({
-            "date": d, "entry": e, "stop": s, "target": t,
+            "date": d, "time": clock12(OPEN_MIN + BAR_MIN * (kk + 1)),
+            "entry": e, "stop": s, "target": t,
             "outcome": oc or "close", "R": round(R, 2),
         })
     return {
@@ -280,6 +303,41 @@ def history_replay(
     }
 
 
+def resolve_rule(plan: dict, entry_day: dict[int, Candle]) -> dict | None:
+    """The rule the history replay uses (skill parity: trader-timemachine.resolve_rule).
+
+    orb only. 'auto' works the stop rule out from the plan day's own opening
+    range: matches or_mid / or_low / or_high within half a cent, else 'pct'
+    (the plan's stop distance as a percent of the entry). None when the setup
+    is not orb.
+    """
+    if plan["setup"].lower() != "orb":
+        return None
+    long = plan["side"] == "buy"
+    n = plan["opening_range"]["minutes"] // BAR_MIN
+    rule = {
+        "setup": "orb", "or_minutes": plan["opening_range"]["minutes"],
+        "stop_rule": plan["stop_rule"], "target_r": plan["target_r"],
+        "stop_pct": round(100.0 * plan["risk_per_share"] / plan["entry"], 4),
+    }
+    far = "or_low" if long else "or_high"
+    if rule["stop_rule"] == "auto":
+        rule["stop_rule"] = "pct"
+        if all(i in entry_day for i in range(n)):
+            oh, ol = _opening_range([entry_day[i] for i in range(n)], n)
+            if abs(_cents_away((oh + ol) / 2, long) - plan["stop"]) < 0.005:
+                rule["stop_rule"] = "or_mid"
+            elif abs(_cents_away(ol if long else oh, long) - plan["stop"]) < 0.005:
+                rule["stop_rule"] = far
+    elif rule["stop_rule"] in ("or_low", "or_high") and rule["stop_rule"] != far:
+        rule["stop_rule"] = "pct"
+    elif rule["stop_rule"] not in ("or_mid", far):
+        rule["stop_rule"] = "pct"
+    if rule["stop_rule"] != "pct":
+        del rule["stop_pct"]
+    return rule
+
+
 # ---------------------------------------------------------------- verdict
 
 def lean(mc: dict) -> tuple[float, float, float] | None:
@@ -292,9 +350,14 @@ def lean(mc: dict) -> tuple[float, float, float] | None:
 
 
 def verdict(mc: dict) -> str:
+    # Exact wording of trader-timemachine (day-trader-skill), until = replay end.
+    until = mc.get("until") or "15:30"
     lv = lean(mc)
     if lv is None:
-        return "No replay reached the target or the stop: the final price decides every one."
+        return (
+            f"No replay reached the target or the stop by {until}: "
+            f"the price at {until} decides every one."
+        )
     d, share, even = lv
     r = mc.get("r_at_target") or 1.0
     pt, ps = mc["p_target"], mc["p_stop"]
@@ -305,28 +368,69 @@ def verdict(mc: dict) -> str:
         head = "Leans toward the target" if d > 0 else "Leans toward the stop"
     else:
         head = "Strongly toward the target" if d > 0 else "Strongly toward the stop"
-    odds = f"target first {100*pt:.1f}% vs stop first {100*ps:.1f}%"
+    odds = f"target first {100*pt:.1f} % vs stop first {100*ps:.1f} %"
     if one_r:
         return f"{head}: {odds}."
     return (
-        f"{head}: at {r:.2f}R the target needs {100*even:.0f}% of side-hits; "
-        f"it got {100*share:.0f}% ({odds})."
+        f"{head}: at {round(r, 2):g}R the target has to come first in "
+        f"{100*even:.0f} % of the replays that hit one side; "
+        f"it did in {100*share:.0f} % ({odds})."
     )
 
 
 def verdict_notes(mc: dict) -> list[str]:
     notes = []
+    until = mc.get("until") or "15:30"
     pn = mc.get("p_neither", 0)
     lv = lean(mc)
     if pn > MANY_NEITHER and lv is not None:
-        notes.append(f"{100*pn:.1f}% of replays hit neither by the end; the final price decides those.")
+        notes.append(
+            f"{100*pn:.1f} % of the replays hit neither by {until}; "
+            f"the price at {until} decides those."
+        )
     avg = mc.get("avg_R")
     if lv and abs(lv[0]) >= COIN_FLIP and avg is not None and avg != 0 and (avg > 0) != (lv[0] > 0):
-        notes.append(f"Average R is {avg:+.3f} all the same: neither-hitters pull it the other way.")
+        notes.append(
+            f"Average R is {avg:+.3f} all the same: "
+            "the replays that hit neither pull it the other way."
+        )
     return notes
 
 
 # ---------------------------------------------------------------- plan + run
+
+def clock12(mins: int) -> str:
+    h, m = divmod(mins, 60)
+    return f"{h % 12 or 12}:{m:02d} {'AM' if h < 12 else 'PM'}"
+
+
+def clock24(mins: int) -> str:
+    h, m = divmod(mins, 60)
+    return f"{h:02d}:{m:02d}"
+
+
+def parse_clock(text: str, what: str) -> int:
+    """'9:45', '09:45 AM', '15:25' -> minutes after midnight (IST)."""
+    m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*(?:([AaPp])\.?\s*[Mm]\.?)?\s*$", str(text or ""))
+    if not m:
+        raise TimeMachineError(f"{what} wants a time like 09:45 or 15:25, not {text!r}")
+    h, mi, ap = int(m.group(1)), int(m.group(2)), (m.group(3) or "").lower()
+    if mi > 59 or h > 23 or (ap and not 1 <= h <= 12):
+        raise TimeMachineError(f"{what} {text!r} is not a clock time")
+    if ap == "p" and h != 12:
+        h += 12
+    elif ap == "a" and h == 12:
+        h = 0
+    return h * 60 + mi
+
+
+def resolve_entry_date(days: dict[str, dict[int, Candle]], k: int) -> str | None:
+    """Latest session that has a complete bar k (today, if the session has it)."""
+    for d in sorted(days, reverse=True):
+        if k in days[d]:
+            return d
+    return None
+
 
 def normalize_plan(raw: dict) -> dict:
     sym = str(raw.get("symbol") or "").strip().upper()
@@ -347,7 +451,30 @@ def normalize_plan(raw: dict) -> dict:
         raise TimeMachineError(f"buy needs stop < entry < target (got {stop}, {entry}, {target})")
     if not long and not (target < entry < stop):
         raise TimeMachineError(f"sell needs target < entry < stop (got {target}, {entry}, {stop})")
-    k = int(raw.get("entry_bar", 0))
+    k: int | None = None
+    et = raw.get("entry_time")
+    if et:
+        close_min = parse_clock(str(et), "entry_time")
+        if (close_min - OPEN_MIN) % BAR_MIN:
+            raise TimeMachineError(
+                f"entry_time {et!r} is not on the 5-minute grid "
+                "(use the bar's close, e.g. 09:45)")
+        k = (close_min - OPEN_MIN) // BAR_MIN - 1
+    if raw.get("entry_bar") is not None:
+        try:
+            kb = int(raw["entry_bar"])
+        except (TypeError, ValueError):
+            raise TimeMachineError(
+                f"entry_bar must be a bar number, got {raw['entry_bar']!r}")
+        if k is not None and kb != k:
+            raise TimeMachineError(
+                f"the plan disagrees with itself: entry_bar {kb} but "
+                f"entry_time {et} is bar {k}")
+        k = kb
+    if k is None:
+        raise TimeMachineError(
+            "the plan needs entry_time (the entry bar's close, e.g. 09:45) "
+            "or entry_bar")
     if not 0 <= k <= SESSION_BARS - 2:
         raise TimeMachineError(f"entry_bar must be 0..{SESSION_BARS-2}, got {k}")
     or_min = int((raw.get("opening_range") or {}).get("minutes", 15))
@@ -357,7 +484,8 @@ def normalize_plan(raw: dict) -> dict:
     return {
         "symbol": sym, "side": side, "date": date,
         "setup": str(raw.get("setup") or "orb"),
-        "entry": entry, "entry_bar": k, "stop": stop, "target": target,
+        "entry": entry, "entry_time": clock12(OPEN_MIN + BAR_MIN * (k + 1)),
+        "entry_bar": k, "stop": stop, "target": target,
         "risk_per_share": round(risk, 2),
         "target_r": round(((target - entry) if long else (entry - target)) / risk, 2),
         "opening_range": {"minutes": or_min},
@@ -395,32 +523,50 @@ def run_time_machine(
 
     sessions, short = full_sessions(days, plan["date"])
     if len(sessions) < MIN_SESSIONS:
+        first = min(days) if days else "unknown"
         raise TimeMachineError(
             f"only {len(sessions)} full session(s) before {plan['date']}; "
-            f"need at least {MIN_SESSIONS}"
-        )
+            f"need at least {MIN_SESSIONS} (data starts {first} — a new "
+            "listing or recent symbol change has too little history)")
     pool = build_pool(sessions)
     mc = simulate(pool, plan["entry"], plan["stop"], plan["target"], k, last,
                   replays, seed, window, plan["side"])
-    mc = dict(mc, pool_sessions=len(sessions), pool_from=sessions[0][0], pool_to=sessions[-1][0])
+    until = clock24(OPEN_MIN + BAR_MIN * (last + 1))
+    mc = dict(mc, until=until, pool_sessions=len(sessions),
+              pool_from=sessions[0][0], pool_to=sessions[-1][0])
 
-    # History: ORB rule replay
-    long = plan["side"] == "buy"
-    n = plan["opening_range"]["minutes"] // BAR_MIN
-    stop_rule = plan["stop_rule"]
-    if stop_rule == "auto":
-        stop_rule = "or_mid" if long else "or_high"
-    rule = {
-        "setup": "orb",
-        "or_minutes": plan["opening_range"]["minutes"],
-        "stop_rule": stop_rule,
-        "target_r": plan["target_r"],
-        "stop_pct": round(100.0 * plan["risk_per_share"] / plan["entry"], 4),
-    }
-    history = history_replay(sessions, rule, last, plan["side"])
+    # Skill parity: warn when the plan's entry sits outside the entry bar's range.
+    warnings: list[str] = []
+    eb = entry_day[k]
+    if not eb.low - 0.01 <= plan["entry"] <= eb.high + 0.01:
+        warnings.append(
+            f"the plan's entry {plan['entry']:.2f} is outside that bar's "
+            f"range {eb.low:.2f} to {eb.high:.2f}")
 
-    return {
+    # History: the plan's own rule on every past session (skill resolve_rule).
+    rule = resolve_rule(plan, entry_day)
+    if rule:
+        history = history_replay(sessions, rule, last, plan["side"])
+    else:
+        history = {
+            "sessions": len(sessions), "triggered": 0,
+            "target": None, "stop": None, "close": None, "green": None,
+            "avg_R": None, "rule": None, "trades": [],
+            "note": (
+                "skipped: the history replay knows the opening-range breakout "
+                f"(orb) only, this plan's setup is {plan['setup']!r}"),
+        }
+
+    notes = verdict_notes(mc)
+    if replays < 100:
+        notes.append(
+            f"small sample: only {replays} replays — probability estimates "
+            "are unreliable; use 1000 or more"
+        )
+
+    result = {
         "created_by": "indian-market-intel/time-machine",
+        "source": "trader-timemachine (day-trader-skill, MIT) — Indian adaptation",
         "note": (
             f"Simulation from {plan['symbol']}'s own last {len(sessions)} full NSE sessions. "
             "Not a prediction. Earnings, news, and halts can exceed historical patterns. "
@@ -430,9 +576,80 @@ def run_time_machine(
         "mc": mc,
         "history": history,
         "verdict": verdict(mc),
-        "verdict_notes": verdict_notes(mc),
+        "verdict_notes": notes,
+        "warnings": warnings,
         "data": {
             "sessions_left_out": short,
             "pool_sessions": len(sessions),
         },
     }
+    result["report"] = report(result)
+    return result
+
+
+def report(doc: dict) -> str:
+    """Plain-text report in the trader-timemachine skill's format (IST/NSE)."""
+    p, m, h = doc["plan"], doc["mc"], doc["history"]
+    long = p["side"] == "buy"
+    until = m.get("until") or "15:30"
+    until_m = int(until[:2]) * 60 + int(until[3:])
+    until12 = clock12(until_m)
+    wd = datetime.date.fromisoformat(p["date"]).strftime("%A")
+
+    def pc(x: float) -> str:
+        return f"{100.0 * x:.1f} %"
+
+    lines = [
+        f"{p['symbol']} {p['side']}, {wd} {p['date']}: entry "
+        f"{p['entry']:.2f} at {p['entry_time']} (bar {p['entry_bar']}), "
+        f"stop {p['stop']:.2f}, target {p['target']:.2f} "
+        f"({p['target_r']:g}R, risk {p['risk_per_share']:.2f} a share).",
+        f"{m['replays']:,} replays of the rest of the session, "
+        f"{p['entry_time']} to {until12} ({m['bars_left']} five-minute bars), "
+        f"seed {m['seed']}.",
+        f"Each bar is drawn whole from {p['symbol']}'s own 5-min bars at the "
+        f"same time of day (+-{m['window']} bars) over its last "
+        f"{m['pool_sessions']} full sessions ({m['pool_from']} to {m['pool_to']}).",
+        "",
+        f"  target first   {pc(m['p_target'])}",
+        f"  stop first     {pc(m['p_stop'])}",
+        "  neither        %-8s still open at %s" % (pc(m["p_neither"]), until12),
+        "  green          %-8s target first, or %s the entry at %s" % (
+            pc(m["p_green"]), "above" if long else "below", until12),
+        "",
+        f"  Price at {until12}: median {m['median_close']:.2f}, "
+        f"90 % of replays between {m['p5_close']:.2f} and {m['p95_close']:.2f}.",
+        f"  Average R: {m['avg_R']:+.3f} (R = the {p['risk_per_share']:.2f} "
+        f"risk: +{m['r_at_target']:g}R at the target, -1R at the stop).",
+        "",
+    ]
+    if h.get("rule"):
+        ru = h["rule"]
+        stop_words = {
+            "or_mid": "opening-range midpoint",
+            "or_low": "opening-range low",
+            "or_high": "opening-range high",
+        }.get(ru["stop_rule"], f"{ru.get('stop_pct', 0):.2f} % from the entry")
+        if h["triggered"]:
+            lines.append(
+                f"History: the same rule ({ru['or_minutes']}-min opening range, "
+                f"stop at the {stop_words}, {ru['target_r']:g}R target) on each "
+                f"of those {h['sessions']} real sessions fired "
+                f"{h['triggered']} times: {h['target']} target, {h['stop']} stop, "
+                f"{h['close']} neither. Average R {h['avg_R']:+.3f}.")
+        else:
+            lines.append(
+                f"History: the same rule never fired in those "
+                f"{h['sessions']} sessions.")
+    else:
+        lines.append("History: " + h.get("note", "skipped."))
+    lines += ["", doc["verdict"]] + list(doc.get("verdict_notes") or [])
+    for w in doc.get("warnings") or []:
+        lines.append("Note: " + w + ".")
+    left = (doc.get("data") or {}).get("sessions_left_out") or []
+    if left:
+        lines.append(
+            f"Left out {len(left)} short session(s) (half days or gaps): "
+            + ", ".join(x["date"] for x in left) + ".")
+    lines.append(doc["note"] + f" Repeat with seed {m['seed']}.")
+    return "\n".join(lines)

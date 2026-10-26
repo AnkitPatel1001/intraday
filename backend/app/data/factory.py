@@ -24,6 +24,9 @@ def get_provider(name: str | None = None) -> MarketDataProvider:
             _cache[name] = SyntheticProvider()
         elif name == "yahoo":
             _cache[name] = YahooProvider()
+        elif name == "upstox":
+            from app.data.upstox import UpstoxProvider
+            _cache[name] = UpstoxProvider()
         else:
             logger.warning("Unknown provider %r, falling back to demo", name)
             _cache[name] = SyntheticProvider()

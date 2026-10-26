@@ -7,6 +7,7 @@ from app.core.timezone import IST
 from app.engine.timemachine import (
     TimeMachineError, normalize_plan, split_sessions, full_sessions,
     build_pool, simulate, verdict, verdict_notes, lean, run_time_machine,
+    resolve_rule, resolve_entry_date, _cents_away,
     SESSION_BARS, MIN_SESSIONS,
 )
 
@@ -178,6 +179,26 @@ class TestSimulate:
         assert mc1["seed"] == 42
         assert mc2["seed"] == 99
 
+    def test_reach_counts_track_any_touch(self):
+        candles = make_sessions(30)
+        days = split_sessions(candles)
+        full, _ = full_sessions(days, "2026-12-01")
+        pool = build_pool(full)
+        mc = simulate(pool, 1000, 990, 1020, k=10, last=50, replays=200, seed=42)
+        rt = mc["count_reach_target"]
+        rs = mc["count_reach_stop"]
+        assert 0 <= rt <= 200
+        assert 0 <= rs <= 200
+        # first-hit outcome implies that level was reached at least once
+        assert rt >= mc["count_target"]
+        assert rs >= mc["count_stop"]
+        # outcome counts still partition the replays
+        assert (
+            mc["count_target"] + mc["count_stop"] + mc["count_close"] == 200
+        )
+        # reach is never more than every replay
+        assert rt <= 200 and rs <= 200
+
 
 class TestVerdict:
     def test_verdict_is_string(self):
@@ -260,8 +281,165 @@ class TestRunTimeMachine:
         assert "r_at_target" in mc
         assert "bars_left" in mc
         assert "pool_sessions" in mc
+        assert mc["until"] == "15:30"
         h = result["history"]
         assert "sessions" in h
         assert "triggered" in h
         assert isinstance(result["verdict"], str)
         assert isinstance(result["verdict_notes"], list)
+
+
+class TestSkillParity:
+    """Output must match the trader-timemachine skill (day-trader-skill) wording."""
+
+    def test_verdict_1r_exact(self):
+        mc = {"p_target": 0.30, "p_stop": 0.30, "p_neither": 0.40,
+              "r_at_target": 1.0, "until": "15:30"}
+        assert verdict(mc) == (
+            "Close to a coin flip: target first 30.0 % vs stop first 30.0 %.")
+
+    def test_verdict_other_r_exact(self):
+        mc = {"p_target": 0.24, "p_stop": 0.50, "p_neither": 0.26,
+              "r_at_target": 2.0, "until": "15:30"}
+        v = verdict(mc)
+        assert "at 2R the target has to come first in 33 % of the replays " \
+               "that hit one side" in v
+        assert "it did in" in v
+        assert "target first 24.0 % vs stop first 50.0 %" in v
+
+    def test_verdict_no_side_uses_until(self):
+        mc = {"p_target": 0.0, "p_stop": 0.0, "p_neither": 1.0,
+              "r_at_target": 1.0, "until": "15:30"}
+        v = verdict(mc)
+        assert "by 15:30" in v
+        assert "the price at 15:30 decides every one" in v
+
+    def test_notes_wording(self):
+        mc = {"p_target": 0.3, "p_stop": 0.2, "p_neither": 0.5,
+              "r_at_target": 1.0, "avg_R": -0.1, "until": "15:30"}
+        notes = verdict_notes(mc)
+        assert any("hit neither by 15:30" in n for n in notes)
+        assert any("the replays that hit neither pull it the other way" in n
+                   for n in notes)
+
+    def test_plan_entry_time(self):
+        plan = normalize_plan(valid_plan())
+        assert plan["entry_time"] == "9:45 AM"  # bar 5 closes 09:45 IST
+
+    def test_report_skill_format(self):
+        series = make_series(35)
+        plan = normalize_plan(valid_plan())
+        result = run_time_machine(series, plan, replays=100, seed=42)
+        rep = result["report"]
+        assert "RELIANCE buy," in rep
+        assert "100 replays of the rest of the session" in rep
+        assert "seed 42." in rep
+        assert "target first" in rep
+        assert "History:" in rep
+        assert rep.rstrip().endswith("Repeat with seed 42.")
+        assert result["source"].startswith("trader-timemachine")
+
+    def test_entry_outside_bar_warns(self):
+        series = make_series(35)
+        plan = normalize_plan(valid_plan(entry=9999.0, stop=9990.0,
+                                         target=10020.0))
+        result = run_time_machine(series, plan, replays=50, seed=1)
+        assert result["warnings"]
+        assert "outside that bar's range" in result["warnings"][0]
+        assert "Note: " in result["report"]
+
+
+class TestEntryTimeInput:
+    def test_from_entry_time(self):
+        raw = valid_plan()
+        raw.pop("entry_bar")
+        raw["entry_time"] = "09:45"
+        p = normalize_plan(raw)
+        assert p["entry_bar"] == 5
+        assert p["entry_time"] == "9:45 AM"
+
+    def test_disagreement(self):
+        with pytest.raises(TimeMachineError, match="disagrees"):
+            normalize_plan(valid_plan(entry_time="09:50"))  # bar 6 vs 5
+
+    def test_off_grid(self):
+        raw = valid_plan()
+        raw.pop("entry_bar")
+        raw["entry_time"] = "09:47"
+        with pytest.raises(TimeMachineError, match="grid"):
+            normalize_plan(raw)
+
+    def test_missing_both(self):
+        raw = valid_plan()
+        raw.pop("entry_bar")
+        with pytest.raises(TimeMachineError, match="entry_time"):
+            normalize_plan(raw)
+
+
+class TestResolveRule:
+    def _day(self):
+        candles = make_sessions(3)
+        days = split_sessions(candles)
+        return list(days.values())[0]
+
+    def test_auto_detects_or_mid(self):
+        day = self._day()
+        n = 3
+        oh = max(day[i].high for i in range(n))
+        ol = min(day[i].low for i in range(n))
+        stop = _cents_away((oh + ol) / 2, True)
+        plan = normalize_plan(valid_plan(entry=1100.0, target=1150.0,
+                                         stop=stop, stop_rule="auto"))
+        rule = resolve_rule(plan, day)
+        assert rule["stop_rule"] == "or_mid"
+        assert "stop_pct" not in rule
+
+    def test_auto_falls_back_to_pct(self):
+        day = self._day()
+        plan = normalize_plan(valid_plan(entry=1100.0, stop=1089.0,
+                                         target=1150.0, stop_rule="auto"))
+        rule = resolve_rule(plan, day)
+        assert rule["stop_rule"] == "pct"
+        assert rule["stop_pct"] > 0
+
+    def test_non_orb_returns_none(self):
+        day = self._day()
+        plan = normalize_plan(valid_plan(setup="flag"))
+        assert resolve_rule(plan, day) is None
+
+    def test_wrong_side_rule_converted_to_pct(self):
+        day = self._day()
+        # sell: far rule is or_high; or_low does not match -> pct
+        plan = normalize_plan(valid_plan(side="sell", entry=1000.0,
+                                         stop=1020.0, target=980.0,
+                                         stop_rule="or_low"))
+        rule = resolve_rule(plan, day)
+        assert rule["stop_rule"] == "pct"
+
+    def test_history_skipped_for_non_orb(self):
+        series = make_series(35)
+        plan = normalize_plan(valid_plan(setup="flag"))
+        result = run_time_machine(series, plan, replays=50, seed=1)
+        h = result["history"]
+        assert h["rule"] is None
+        assert h["triggered"] == 0
+        assert "orb) only" in h["note"]
+        assert "History: skipped" in result["report"]
+
+
+class TestResolveEntryDate:
+    def _days(self):
+        return split_sessions(make_sessions(3))
+
+    def test_picks_latest_with_bar(self):
+        days = self._days()
+        ordered = sorted(days)
+        del days[ordered[-1]][5]
+        # latest day lost bar 5 -> falls back to the one before it
+        assert resolve_entry_date(days, 5) == ordered[-2]
+        assert resolve_entry_date(days, 6) == ordered[-1]
+
+    def test_none_when_missing(self):
+        days = self._days()
+        assert resolve_entry_date(days, 999) is None
+        assert resolve_entry_date({}, 5) is None

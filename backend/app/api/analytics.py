@@ -42,25 +42,25 @@ async def performance(request: Request):
             }
             for p in pf.closed_positions[-50:]
         ],
-        "label": "PAPER TRADING analytics â€” simulated results",
+        "label": "PAPER TRADING analytics — simulated results",
     }
 
 
 @router.get("/export")
 async def export_csv(request: Request):
     e = get_engine(session_of(request))
-    lines = ["symbol,side,qty,entry_price,exit_price,pnl,fees,realized_pnl"]
-    for p in e.portfolio.closed_positions:
-        lines.append(
-            f"{p.symbol},{p.side},{p.qty},{p.avg_price},,"
-            f",,{round(p.realized_pnl, 2)}"
-        )
+    # Honest per-order schema: one row per order, columns match header.
+    lines = [
+        "order_id,symbol,side,order_type,qty,fill_price,slippage,fees,status,tag"
+    ]
     for o in e.orders:
-        if o.status == "filled":
-            lines.append(
-                f"{o.symbol},{o.side},{o.qty},{o.fill_price},,"
-                f",,{o.fees}"
-            )
+        fill = "" if o.fill_price is None else f"{o.fill_price:.2f}"
+        slip = "" if o.fill_price is None else f"{o.slippage:.2f}"
+        fees = "" if o.fill_price is None else f"{o.fees:.2f}"
+        lines.append(
+            f"{o.id},{o.symbol},{o.side},{o.order_type},{o.qty},"
+            f"{fill},{slip},{fees},{o.status},{o.tag}"
+        )
     csv = "\n".join(lines)
     from fastapi.responses import PlainTextResponse
     return PlainTextResponse(csv, media_type="text/csv")

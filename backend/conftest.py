@@ -1,5 +1,11 @@
 """Shared test fixtures."""
 
+import os
+
+# Tests must run on synthetic demo data — pin before app config loads,
+# so a developer's local .env (e.g. DATA_PROVIDER=yahoo) cannot leak in.
+os.environ["DATA_PROVIDER"] = "demo"
+
 import datetime
 import pytest
 from app.core.primitives import Candle, BarSeries, DataFreshness
@@ -19,11 +25,14 @@ def _open_test_env():
 
     s = get_settings()
     prev_auth, prev_rl = s.auth_enabled, s.rate_limit_per_minute
+    prev_off = s.paper_allow_off_hours
     s.auth_enabled = False
     s.rate_limit_per_minute = 0
+    s.paper_allow_off_hours = True
     limiter.reset()
     yield
     s.auth_enabled, s.rate_limit_per_minute = prev_auth, prev_rl
+    s.paper_allow_off_hours = prev_off
     limiter.reset()
 
 

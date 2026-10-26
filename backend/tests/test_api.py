@@ -114,6 +114,34 @@ class TestTrades:
             })
             assert r.status_code == 400
 
+    async def test_timemachine_no_date_uses_latest_session(self):
+        # No date: falls back to the latest session with the entry bar
+        # (today when the demo session has it) instead of 400-ing.
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post("/api/v1/trades/timemachine", json={
+                "symbol": "RELIANCE", "entry": 2800, "stop": 2750,
+                "target": 2900, "replays": 100, "seed": 19,
+            })
+            assert r.status_code == 200, r.text
+            d = r.json()
+            import datetime as _dt
+            assert d["plan"]["date"] <= _dt.date.today().isoformat()
+            assert d["plan"]["entry_time"]
+            assert "target first" in d["report"]
+            assert "seed 19" in d["report"]
+            assert "History:" in d["report"]
+
+    async def test_timemachine_entry_time_agreement(self):
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            # entry_bar 6 but entry_time 09:45 = bar 5 -> plan disagrees
+            r = await c.post("/api/v1/trades/timemachine", json={
+                "symbol": "RELIANCE", "entry": 2800, "stop": 2750,
+                "target": 2900, "entry_bar": 6, "entry_time": "09:45",
+                "replays": 10,
+            })
+            assert r.status_code == 400
+            assert "disagrees" in r.json()["detail"]
+
 
 class TestRisk:
     async def test_check_pass(self):

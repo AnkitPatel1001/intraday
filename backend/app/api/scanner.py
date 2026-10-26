@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 
 from fastapi import APIRouter, Body, HTTPException, Query
@@ -32,27 +33,30 @@ async def run_scan(
     end = now_ist().date()
     start = end - datetime.timedelta(days=days)
 
-    results = []
-    errors = []
-    for sym_str in syms:
+    async def one(sym_str: str):
         try:
             sym = validate_symbol(sym_str)
         except ValueError as e:
-            errors.append({"symbol": sym_str, "error": str(e)})
-            continue
+            return ("err", sym_str, str(e))
         try:
             series = await provider.get_bars(sym, interval, start, end)
             r = scan_symbol(series, filters)
             if r:
-                results.append({
+                return ("hit", {
                     "symbol": r.symbol, "price": r.price,
                     "setups": r.setups, "indicators": r.indicators,
                     "reason": r.reason,
                     "freshness": r.freshness, "source": r.source,
                     "warnings": r.warnings,
                 })
+            return ("miss", None)
         except Exception as e:
-            errors.append({"symbol": sym, "error": str(e)})
+            return ("err", sym, str(e))
+
+    outcomes = await asyncio.gather(*(one(s) for s in syms))
+    results = [o[1] for o in outcomes if o[0] == "hit"]
+    errors = [{"symbol": o[1], "error": o[2]}
+              for o in outcomes if o[0] == "err"]
 
     return {
         "scanned": len(syms),

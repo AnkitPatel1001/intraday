@@ -12,8 +12,12 @@ from app.core.calendar import SESSION_BARS
 from app.core.symbols import validate_symbol
 from app.core.timezone import now_ist
 from app.data.factory import get_provider
+from app.api.provider_errors import provider_502
 from app.engine.planner import build_plan, estimate_costs, position_size
-from app.engine.timemachine import run_time_machine, normalize_plan, TimeMachineError
+from app.engine.timemachine import (
+    run_time_machine, normalize_plan, resolve_entry_date, split_sessions,
+    TimeMachineError,
+)
 
 router = APIRouter()
 
@@ -41,6 +45,7 @@ class TimeMachineRequest(BaseModel):
     stop: float = Field(..., gt=0, le=1e9)
     target: float = Field(..., gt=0, le=1e9)
     entry_bar: int = 5
+    entry_time: str | None = None  # e.g. "09:45" (bar close, IST); overrides entry_bar
     setup: str = "orb"
     or_minutes: int = Field(15, ge=5, le=60)
     stop_rule: str = "auto"
@@ -76,7 +81,7 @@ async def create_plan(req: PlanRequest):
     try:
         series = await provider.get_bars(sym, req.interval, start, end)
     except Exception as e:
-        raise HTTPException(502, "data provider error")
+        raise provider_502(sym, e) from e
 
     try:
         plan = build_plan(
@@ -89,7 +94,7 @@ async def create_plan(req: PlanRequest):
 
     return {
         "plan": plan.__dict__,
-        "label": "RESEARCH PLAN â€” simulated trade plan, not a buy/sell instruction",
+        "label": "RESEARCH PLAN — simulated trade plan, not a buy/sell instruction",
         "data_label": series.label(),
     }
 
@@ -102,26 +107,56 @@ async def time_machine(req: TimeMachineRequest):
     except ValueError as e:
         raise HTTPException(400, str(e))
 
-    plan_dict = {
+    today = now_ist().date()
+    plan_dict: dict = {
         "symbol": sym, "side": req.side,
-        "date": req.date or now_ist().date().isoformat(),
         "entry": req.entry, "stop": req.stop, "target": req.target,
-        "entry_bar": req.entry_bar, "setup": req.setup,
+        "setup": req.setup,
         "opening_range": {"minutes": req.or_minutes},
         "stop_rule": req.stop_rule,
     }
+    if req.entry_time:
+        plan_dict["entry_time"] = req.entry_time
+        if "entry_bar" in req.model_fields_set:
+            plan_dict["entry_bar"] = req.entry_bar
+    else:
+        plan_dict["entry_bar"] = req.entry_bar
+
+    # Fast validation (ordering, bar grid) before any network call.
     try:
-        plan = normalize_plan(plan_dict)
+        plan = normalize_plan({**plan_dict, "date": (req.date or today.isoformat())})
     except TimeMachineError as e:
         raise HTTPException(400, str(e))
+    if datetime.date.fromisoformat(plan["date"]) > today:
+        raise HTTPException(400, "date cannot be in the future")
 
     provider = get_provider()
-    end = datetime.date.fromisoformat(plan["date"])
-    start = end - datetime.timedelta(days=90)
-    try:
-        series = await provider.get_bars(sym, "5m", start, end)
-    except Exception as e:
-        raise HTTPException(502, "data provider error")
+    if req.date is None:
+        # Default date = today (skill behaviour), but fall back to the latest
+        # session that actually has the entry bar — pre-market/weekend/holiday
+        # would otherwise 400 with no way to run.
+        try:
+            series = await provider.get_bars(
+                sym, "5m", today - datetime.timedelta(days=90), today)
+        except Exception as e:
+            raise provider_502(sym, e) from e
+        resolved = resolve_entry_date(split_sessions(series.candles),
+                                      plan["entry_bar"])
+        if resolved is None:
+            raise HTTPException(
+                400, f"entry bar {plan['entry_bar']} not found in the last "
+                     "90 days — no complete 5-min bar")
+        try:
+            plan = normalize_plan({**plan_dict, "date": resolved})
+        except TimeMachineError as e:
+            raise HTTPException(400, str(e))
+    else:
+        end = datetime.date.fromisoformat(plan["date"])
+        try:
+            series = await provider.get_bars(
+                sym, "5m", end - datetime.timedelta(days=90), end)
+        except Exception as e:
+            raise provider_502(sym, e) from e
 
     try:
         # CPU-bound simulation runs off the event loop; concurrency capped.

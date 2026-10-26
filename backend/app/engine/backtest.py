@@ -79,7 +79,14 @@ def run_backtest(
         if position is not None:
             exit_price = None
             reason = ""
-            if position["side"] == "buy":
+            exit_ts = bar.ts
+            # Intraday rule: never hold across sessions. Close at previous
+            # session's last close as soon as a new trading day starts.
+            if bar.ts.date() != position["entry_time"].date():
+                exit_price = prev.close
+                reason = "eod"
+                exit_ts = prev.ts
+            elif position["side"] == "buy":
                 if bar.low <= position["stop"]:
                     exit_price = position["stop"]
                     reason = "stop"
@@ -111,7 +118,7 @@ def run_backtest(
                 r_mult = pnl / (risk * position["qty"]) if risk > 0 else 0
                 trades.append(Trade(
                     entry_time=position["entry_time"],
-                    exit_time=bar.ts,
+                    exit_time=exit_ts,
                     entry_price=position["entry"],
                     exit_price=exit_price,
                     qty=position["qty"],
@@ -142,7 +149,6 @@ def run_backtest(
                             "target": target, "qty": qty,
                             "entry_time": bar.ts,
                         }
-                        cash -= cost * 0  # intraday margin, simplified
 
         # Track equity
         unrealized = 0.0
@@ -166,13 +172,28 @@ def run_backtest(
     avg_loss = sum(t.pnl for t in losses) / len(losses) if losses else 0
     gross_win = sum(t.pnl for t in wins)
     gross_loss = abs(sum(t.pnl for t in losses))
-    profit_factor = gross_win / gross_loss if gross_loss > 0 else float("inf") if gross_win > 0 else 0
+    if gross_loss > 0:
+        profit_factor = round(gross_win / gross_loss, 2)
+    elif gross_win > 0:
+        profit_factor = 999.99
+        warnings.append("profit_factor capped at 999.99 (no losing trades)")
+    else:
+        profit_factor = 0.0
 
-    # Sharpe (simplified: daily returns)
-    if len(equity) > 1:
-        rets = [(equity[i] - equity[i-1]) / equity[i-1] for i in range(1, len(equity)) if equity[i-1] > 0]
-        mean_r = sum(rets) / len(rets) if rets else 0
-        var = sum((r - mean_r) ** 2 for r in rets) / len(rets) if rets else 0
+    # Sharpe: annualized from daily closes of the equity curve (252 trading days)
+    daily_equity: dict[datetime.date, float] = {}
+    for k in range(1, len(equity)):
+        daily_equity[candles[k - 1].ts.date()] = equity[k]
+    daily_rets = []
+    prev_eq = capital
+    for d in sorted(daily_equity):
+        eq = daily_equity[d]
+        if prev_eq > 0:
+            daily_rets.append((eq - prev_eq) / prev_eq)
+        prev_eq = eq
+    if len(daily_rets) > 1:
+        mean_r = sum(daily_rets) / len(daily_rets)
+        var = sum((r - mean_r) ** 2 for r in daily_rets) / len(daily_rets)
         std = var ** 0.5
         sharpe = (mean_r / std * (252 ** 0.5)) if std > 0 else 0
     else:

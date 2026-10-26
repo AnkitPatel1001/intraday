@@ -60,11 +60,16 @@ def create_app() -> FastAPI:
         settings = get_settings()
         path = request.url.path
 
-        # 1. Rate limiting (market reads get a 5x bucket)
+        # 1. Rate limiting (market reads get a 5x bucket; keyed per token so
+        #    one exhausted session cannot starve others behind the same host)
         if settings.rate_limit_per_minute > 0 and path not in _RATE_EXEMPT_EXACT:
             is_read = path.startswith("/api/v1/market/")
             limit = settings.rate_limit_per_minute * (5 if is_read else 1)
-            key = f"{request.client.host if request.client else 'unknown'}|{'read' if is_read else 'write'}"
+            token = auth.extract_token(request) or ""
+            key = (
+                f"{request.client.host if request.client else 'unknown'}"
+                f"|{token}|{'read' if is_read else 'write'}"
+            )
             allowed, retry_after = limiter.check(key, limit)
             if not allowed:
                 return JSONResponse(
@@ -100,7 +105,9 @@ def create_app() -> FastAPI:
 
         response = await call_next(request)
 
-        # 3. Security headers
+        # 3. Security headers (and strip server fingerprint)
+        if "server" in response.headers:
+            del response.headers["server"]
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "no-referrer")

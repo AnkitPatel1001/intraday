@@ -120,7 +120,9 @@ class TestParseChart:
         assert series.freshness == DataFreshness.DELAYED
         assert series.candles[0].open == 100.0
 
-    def test_null_values_skipped(self):
+    def test_null_values_forward_filled(self):
+        # Yahoo regularly returns null-OHLC bars near close; carry last close
+        # forward so sessions stay complete (else Time Machine finds 0 full sessions).
         t0 = int(datetime.datetime(2026, 10, 20, 3, 45,
                                    tzinfo=datetime.timezone.utc).timestamp())
         p = y.YahooProvider()
@@ -129,7 +131,21 @@ class TestParseChart:
                            [99.5, None], [100.5, None])),
             "RELIANCE", "5m",
         )
+        assert len(series.candles) == 2
+        flat = series.candles[1]
+        assert (flat.open, flat.high, flat.low, flat.close) == (100.5,) * 4
+
+    def test_leading_null_still_skipped(self):
+        t0 = int(datetime.datetime(2026, 10, 20, 3, 45,
+                                   tzinfo=datetime.timezone.utc).timestamp())
+        p = y.YahooProvider()
+        series = p._parse_chart(
+            self._payload(([t0, t0 + 300], [None, 101.0], [None, 102.0],
+                           [None, 100.0], [None, 101.5])),
+            "RELIANCE", "5m",
+        )
         assert len(series.candles) == 1
+        assert series.candles[0].open == 101.0
 
     def test_invalid_ohlc_skipped(self):
         t0 = int(datetime.datetime(2026, 10, 20, 3, 45,
@@ -159,3 +175,55 @@ class TestURL:
     def test_chart_url_intervals(self):
         for iv in ("1m", "5m", "15m", "1d", "1wk"):
             assert f"interval={iv}" in y._chart_url("TCS", iv, y.HOSTS[0])
+
+    def test_chart_url_index_mapped(self):
+        url = y._chart_url("NIFTY50", "5m", y.HOSTS[0])
+        assert "%5ENSEI" in url  # ^NSEI url-encoded
+        assert "NIFTY50.NS" not in url
+
+    def test_chart_url_banknifty_mapped(self):
+        assert "%5ENSEBANK" in y._chart_url("BANKNIFTY", "1d", y.HOSTS[0])
+
+    def test_chart_url_period_honors_start_end(self):
+        start = datetime.date(2026, 9, 1)
+        end = datetime.date(2026, 10, 24)
+        url = y._chart_url("RELIANCE", "1d", y.HOSTS[0], start, end)
+        assert "period1=" in url and "period2=" in url
+        assert "range=" not in url
+
+    def test_chart_url_period_clamped_to_60d_for_5m(self):
+        start = datetime.date(2026, 1, 1)
+        end = datetime.date(2026, 10, 24)
+        url = y._chart_url("RELIANCE", "5m", y.HOSTS[0], start, end)
+        p1 = int(url.split("period1=")[1].split("&")[0])
+        p2 = int(url.split("period2=")[1].split("&")[0])
+        span_days = (p2 - p1) / 86400
+        assert span_days <= 60  # yahoo 5m hard limit (else HTTP 422)
+        # lookback also measured from today, not from the requested end
+        import datetime as dt
+        from app.core.timezone import IST
+        floor = dt.datetime.now(IST).date() - dt.timedelta(days=60)
+        p1_date = dt.datetime.fromtimestamp(p1, IST).date()
+        assert p1_date >= floor
+
+
+class TestIndexMeta:
+    def test_index_symbol_survives_parse(self):
+        # meta.symbol is ^NSEI but consumers ask for NIFTY50 (valid NSE format)
+        t0 = int(datetime.datetime(2026, 10, 20, 3, 45,
+                                   tzinfo=datetime.timezone.utc).timestamp())
+        payload = json.dumps({
+            "chart": {"result": [{
+                "meta": {"symbol": "^NSEI"},
+                "timestamp": [t0],
+                "indicators": {"quote": [{
+                    "open": [22600.0], "high": [22650.0],
+                    "low": [22550.0], "close": [22600.0],
+                    "volume": [0],
+                }]},
+            }]},
+        })
+        p = y.YahooProvider()
+        series = p._parse_chart(payload, "NIFTY50", "5m")
+        assert series.symbol == "NIFTY50"
+        assert series.candles[0].close == 22600.0

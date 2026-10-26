@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
-import { apiPost } from "@/lib/api";
-import type { TimeMachineRequest, TimeMachineResponse } from "@/lib/types";
-import { formatINR, formatNumber, formatPct } from "@/lib/format";
+import { useEffect, useRef, useState } from "react";
+import { apiGet, apiPost } from "@/lib/api";
+import type { Quote, TimeMachineRequest, TimeMachineResponse } from "@/lib/types";
+import { formatINR, formatINRSigned, formatNumber, formatPct } from "@/lib/format";
+import { deriveLevels, autoOdds, type Levels } from "@/lib/tm";
 import FreshnessBadge from "@/components/FreshnessBadge";
 
 export default function TimeMachinePage() {
@@ -16,9 +17,67 @@ export default function TimeMachinePage() {
   const [replays, setReplays] = useState("10000");
   const [seed, setSeed] = useState("19");
 
+  const [ltp, setLtp] = useState<number | null>(null);
+  const [ltpInfo, setLtpInfo] = useState("");
+  const [ltpError, setLtpError] = useState<string | null>(null);
+  const fetchSeq = useRef(0);
+
   const [result, setResult] = useState<TimeMachineResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Auto run: levels derived from live price, fixed skill defaults
+  // (10,000 replays, seed 19) — hit counts + ₹ amounts per stock.
+  const [autoQty, setAutoQty] = useState("10");
+  const [autoRunning, setAutoRunning] = useState(false);
+  const [autoErr, setAutoErr] = useState<string | null>(null);
+  const [autoRes, setAutoRes] = useState<TimeMachineResponse | null>(null);
+  const [autoLevels, setAutoLevels] = useState<Levels | null>(null);
+
+  const fillFromLtp = async (sym: string, why: "auto" | "manual") => {
+    const seq = ++fetchSeq.current;
+    try {
+      const q = await apiGet<Quote>(
+        `/api/v1/market/quote/${encodeURIComponent(sym)}`
+      );
+      if (seq !== fetchSeq.current) return; // stale: a newer fetch superseded it
+      const lv = deriveLevels(q.last_price, side);
+      setEntry(String(lv.entry));
+      setStop(String(lv.stop));
+      setTarget(String(lv.target));
+      setLtp(q.last_price);
+      setLtpInfo([q.source, q.label || q.freshness].filter(Boolean).join(" · "));
+      setLtpError(null);
+      if (why === "manual") setError(null);
+    } catch (err) {
+      if (seq !== fetchSeq.current) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      setLtpError(msg);
+      if (why === "manual") setError(`live price unavailable: ${msg}`);
+    }
+  };
+
+  // Symbol changed -> debounced fetch of the live price, entry/stop/target
+  // re-derived from it (the old values were never refreshed before).
+  useEffect(() => {
+    const sym = symbol.trim().toUpperCase();
+    if (!sym) return;
+    const t = setTimeout(() => {
+      void fillFromLtp(sym, "auto");
+    }, 400);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol]);
+
+  // Side flipped -> re-derive stop/target from the last live price.
+  useEffect(() => {
+    if (ltp == null) return;
+    const lv = deriveLevels(ltp, side);
+    setEntry(String(lv.entry));
+    setStop(String(lv.stop));
+    setTarget(String(lv.target));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [side]);
 
   const run = async () => {
     setLoading(true);
@@ -52,6 +111,50 @@ export default function TimeMachinePage() {
 
   const mc = result?.mc;
   const history = result?.history;
+
+  const runAuto = async () => {
+    const sym = symbol.trim().toUpperCase();
+    if (!sym) {
+      setAutoErr("enter a symbol first");
+      return;
+    }
+    setAutoRunning(true);
+    setAutoErr(null);
+    try {
+      const q = await apiGet<Quote>(
+        `/api/v1/market/quote/${encodeURIComponent(sym)}`
+      );
+      const lv = deriveLevels(q.last_price, side);
+      const res = await apiPost<TimeMachineResponse>(
+        "/api/v1/trades/timemachine",
+        {
+          symbol: sym,
+          side,
+          entry: lv.entry,
+          stop: lv.stop,
+          target: lv.target,
+          entry_bar: Number(entryBar) || 5,
+          replays: 10000,
+          seed: 19,
+        }
+      );
+      setAutoRes(res);
+      setAutoLevels(lv);
+    } catch (err) {
+      setAutoErr(err instanceof Error ? err.message : String(err));
+      setAutoRes(null);
+      setAutoLevels(null);
+    } finally {
+      setAutoRunning(false);
+    }
+  };
+
+  const autoMc = autoRes?.mc;
+  const autoQtyNum = Math.max(1, Number(autoQty) || 1);
+  const odds =
+    autoMc && autoLevels
+      ? autoOdds(autoMc, autoLevels, side, autoQtyNum)
+      : null;
 
   const bars = [
     {
@@ -125,6 +228,30 @@ export default function TimeMachinePage() {
                 value={symbol}
                 onChange={(e) => setSymbol(e.target.value)}
               />
+              <div className="flex items-center justify-between gap-2 mt-1.5 flex-wrap">
+                <span className="text-[11px] num text-gray-500">
+                  {ltp != null ? (
+                    <>
+                      LTP {formatINR(ltp)}
+                      {ltpInfo ? <span className="text-gray-600"> · {ltpInfo}</span> : null}
+                    </>
+                  ) : ltpError ? (
+                    <span className="text-amber-400">live price unavailable</span>
+                  ) : (
+                    "fetching live price…"
+                  )}
+                </span>
+                <button
+                  className="btn-ghost text-[10px] px-2 py-0.5"
+                  onClick={() => {
+                    const sym = symbol.trim().toUpperCase();
+                    if (sym) void fillFromLtp(sym, "manual");
+                  }}
+                  disabled={loading}
+                >
+                  Fill from live price
+                </button>
+              </div>
             </div>
             <div>
               <label className="label-caps block mb-1.5">Side</label>
@@ -229,6 +356,13 @@ export default function TimeMachinePage() {
 
           {result && mc ? (
             <>
+              {result.warnings && result.warnings.length > 0 ? (
+                <div className="text-xs text-amber-300 border border-amber-500/40 bg-amber-500/10 rounded p-3 num">
+                  {result.warnings.map((w, i) => (
+                    <div key={i}>Note: {w}.</div>
+                  ))}
+                </div>
+              ) : null}
               <div className="card p-5">
                 <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
                   <div className="label-caps">
@@ -323,6 +457,9 @@ export default function TimeMachinePage() {
                   ) : (
                     <div className="text-sm text-gray-600">No history returned.</div>
                   )}
+                  {history?.note ? (
+                    <p className="text-[11px] text-gray-600 mt-3">{history.note}</p>
+                  ) : null}
                   <div className="text-[11px] text-gray-600 mt-4 border-t border-gray-800 pt-3">
                     Historical replay applies the same entry/stop/target rules to
                     past sessions — costs excluded, entry bar fixed.
@@ -354,13 +491,217 @@ export default function TimeMachinePage() {
                     v={String(result.plan?.entry_bar ?? entryBar)}
                   />
                   <Mini label="Setup" v={String(result.plan?.setup ?? "—")} />
+                  <Mini label="Entry time" v={String(result.plan?.entry_time ?? "—")} />
                   <Mini label="Bars left" v={formatNumber(mc.bars_left, 0)} />
                 </div>
               </div>
+
+              {result.report ? (
+                <div className="card p-5">
+                  <div className="label-caps mb-3">
+                    Skill report — trader-timemachine format
+                  </div>
+                  <pre className="text-[11px] leading-relaxed text-gray-300 whitespace-pre-wrap num">
+                    {result.report}
+                  </pre>
+                </div>
+              ) : null}
             </>
           ) : null}
         </section>
       </div>
+
+      <section className="card p-5 space-y-4">
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div>
+            <div className="label-caps">
+              Auto run — skill odds for this stock
+            </div>
+            <p className="text-[11px] text-gray-600 mt-1 leading-relaxed">
+              One click: entry/stop/target auto-derived from the live price,
+              then 10,000 trader-timemachine replays (seed 19). Exact hit counts
+              and ₹ per share / totals for your qty.
+            </p>
+          </div>
+          <FreshnessBadge freshness="simulated" source="skill engine" />
+        </div>
+
+        <div className="flex items-end gap-3 flex-wrap">
+          <div>
+            <label className="label-caps block mb-1.5">Qty (for ₹ totals)</label>
+            <input
+              type="number"
+              min={1}
+              className="input-dark num w-28"
+              value={autoQty}
+              onChange={(e) => setAutoQty(e.target.value)}
+            />
+          </div>
+          <button
+            className="btn-primary"
+            onClick={runAuto}
+            disabled={autoRunning}
+          >
+            {autoRunning
+              ? "Running 10,000 replays…"
+              : `Auto run: ${symbol.trim().toUpperCase() || "—"}`}
+          </button>
+        </div>
+
+        {autoErr ? (
+          <div className="text-xs text-red-400 num break-all border border-red-500/30 rounded p-2 bg-red-500/5">
+            {autoErr}
+          </div>
+        ) : null}
+
+        {autoRes && autoMc && odds && autoLevels ? (
+          <>
+            {autoRes.warnings && autoRes.warnings.length > 0 ? (
+              <div className="text-[11px] text-amber-300 border border-amber-500/40 bg-amber-500/10 rounded p-2 num">
+                {autoRes.warnings.map((w, i) => (
+                  <div key={i}>Note: {w}.</div>
+                ))}
+              </div>
+            ) : null}
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-[#0d1321] border border-green/40 rounded p-4">
+                <div className="label-caps">Hit target</div>
+                <div className="num text-2xl mt-1 text-green">
+                  {formatNumber(odds.targetCount, 0)}{" "}
+                  <span className="text-sm text-gray-500">
+                    / {formatNumber(odds.replays, 0)}
+                  </span>
+                </div>
+                <div className="num text-sm text-green mt-1">
+                  {formatPct((odds.targetCount / odds.replays) * 100, 1)}
+                </div>
+                <div className="text-xs text-gray-400 mt-2 num leading-relaxed">
+                  +{formatINR(odds.rewardPerShare)} / share
+                  <br />
+                  +{formatINR(odds.rewardTotal)} for {autoQtyNum} qty
+                </div>
+              </div>
+
+              <div className="bg-[#0d1321] border border-red/40 rounded p-4">
+                <div className="label-caps">Hit stop</div>
+                <div className="num text-2xl mt-1 text-red">
+                  {formatNumber(odds.stopCount, 0)}{" "}
+                  <span className="text-sm text-gray-500">
+                    / {formatNumber(odds.replays, 0)}
+                  </span>
+                </div>
+                <div className="num text-sm text-red mt-1">
+                  {formatPct((odds.stopCount / odds.replays) * 100, 1)}
+                </div>
+                <div className="text-xs text-gray-400 mt-2 num leading-relaxed">
+                  −{formatINR(odds.riskPerShare)} / share
+                  <br />−{formatINR(odds.riskTotal)} for {autoQtyNum} qty
+                </div>
+              </div>
+
+              <div className="bg-[#0d1321] border border-gray-800 rounded p-4">
+                <div className="label-caps">Neither (session end)</div>
+                <div className="num text-2xl mt-1 text-gray-300">
+                  {formatNumber(odds.neitherCount, 0)}{" "}
+                  <span className="text-sm text-gray-500">
+                    / {formatNumber(odds.replays, 0)}
+                  </span>
+                </div>
+                <div className="num text-sm text-gray-500 mt-1">
+                  {formatPct((odds.neitherCount / odds.replays) * 100, 1)}
+                </div>
+                <div className="text-xs text-gray-600 mt-2 leading-relaxed">
+                  Closed at {autoMc.until ?? "15:30"} without either level
+                </div>
+              </div>
+            </div>
+
+            <div className="border-t border-gray-800 pt-3 space-y-2">
+              <div className="label-caps">
+                Price reach — how many replays touched the level
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="bg-[#0d1321] border border-green/30 rounded p-3">
+                  <div className="flex items-center justify-between gap-2 text-sm flex-wrap">
+                    <span className="text-gray-400 num">
+                      Reached {formatINR(autoLevels.target)}
+                    </span>
+                    <span className="num font-semibold text-green">
+                      {formatNumber(odds.reachTargetCount, 0)} /{" "}
+                      {formatNumber(odds.replays, 0)} (
+                      {formatPct((odds.reachTargetCount / odds.replays) * 100, 1)}
+                      )
+                    </span>
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1.5 num">
+                    +{formatINR(odds.rewardPerShare)} / share · +
+                    {formatINR(odds.rewardTotal)} for {autoQtyNum} qty
+                  </div>
+                </div>
+                <div className="bg-[#0d1321] border border-red/30 rounded p-3">
+                  <div className="flex items-center justify-between gap-2 text-sm flex-wrap">
+                    <span className="text-gray-400 num">
+                      Reached {formatINR(autoLevels.stop)}
+                    </span>
+                    <span className="num font-semibold text-red">
+                      {formatNumber(odds.reachStopCount, 0)} /{" "}
+                      {formatNumber(odds.replays, 0)} (
+                      {formatPct((odds.reachStopCount / odds.replays) * 100, 1)}
+                      )
+                    </span>
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1.5 num">
+                    −{formatINR(odds.riskPerShare)} / share · −
+                    {formatINR(odds.riskTotal)} for {autoQtyNum} qty
+                  </div>
+                </div>
+              </div>
+              <div className="text-[10px] text-gray-600 leading-relaxed">
+                A path can touch both levels — reach counts are independent.
+                Tiles above count only which level was hit first.
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 flex-wrap border-t border-gray-800 pt-3">
+              <div className="text-sm text-gray-400 num">
+                Expected value:{" "}
+                <span
+                  className={
+                    odds.evPerShare >= 0 ? "text-green" : "text-red"
+                  }
+                >
+                  {formatINRSigned(odds.evPerShare)} / share
+                </span>{" "}
+                ·{" "}
+                <span className={odds.evTotal >= 0 ? "text-green" : "text-red"}>
+                  {formatINRSigned(odds.evTotal)} for {autoQtyNum} qty
+                </span>
+              </div>
+              <div className="text-[11px] num text-gray-500">
+                Levels: entry {formatINR(autoLevels.entry)} · stop{" "}
+                {formatINR(autoLevels.stop)} · target{" "}
+                {formatINR(autoLevels.target)} (auto from LTP)
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 flex-wrap">
+              <span
+                className={`inline-block px-3 py-2 rounded border text-sm font-bold num ${verdictTone(
+                  autoRes.verdict
+                )}`}
+              >
+                {autoRes.verdict}
+              </span>
+              <span className="text-[11px] text-gray-600 num">
+                {formatNumber(autoRes.history.sessions, 0)} sessions pooled ·
+                entry bar {String(autoRes.plan?.entry_bar ?? entryBar)} · until{" "}
+                {autoMc.until ?? "15:30"}
+              </span>
+            </div>
+          </>
+        ) : null}
+      </section>
     </div>
   );
 }
