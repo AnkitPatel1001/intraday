@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -18,7 +19,7 @@ class RiskCheckRequest(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)
 
     symbol: str
-    side: str = "buy"
+    side: Literal["buy", "sell"] = "buy"
     entry: float = Field(..., gt=0, le=1e9)
     stop: float = Field(..., gt=0, le=1e9)
     target: float = Field(..., gt=0, le=1e9)

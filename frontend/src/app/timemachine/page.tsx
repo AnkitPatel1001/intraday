@@ -90,7 +90,7 @@ export default function TimeMachinePage() {
         stop: Number(stop),
         target: Number(target),
         entry_bar: Number(entryBar) || 5,
-        replays: Number(replays) || 10000,
+        replays: Math.min(100000, Math.max(1, Number(replays) || 10000)),
         seed: Number(seed) || 19,
       };
       if (!body.entry || !body.stop || !body.target) {
@@ -305,13 +305,14 @@ export default function TimeMachinePage() {
               />
             </div>
             <div>
-              <label className="label-caps block mb-1.5">Replays</label>
+              <label className="label-caps block mb-1.5">Replays (max 100,000)</label>
               <input
                 type="number"
                 className="input-dark num"
                 value={replays}
                 onChange={(e) => setReplays(e.target.value)}
                 min={100}
+                max={100000}
               />
             </div>
             <div className="col-span-2">

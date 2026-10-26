@@ -87,6 +87,13 @@ class TestTimeMachineBounds:
                              "target": 110, "replays": 0})
         assert r.status_code == 422
 
+    async def test_replays_over_cap_422(self):
+        """F-08: >100k replays = ~56s CPU at 1M — cap enforces 422."""
+        r = await post_json("/api/v1/trades/timemachine",
+                            {"symbol": "RELIANCE", "entry": 100, "stop": 95,
+                             "target": 110, "replays": 100001})
+        assert r.status_code == 422
+
     async def test_negative_entry_422(self):
         r = await post_json("/api/v1/trades/timemachine",
                             {"symbol": "RELIANCE", "entry": -1, "stop": 95,
@@ -184,6 +191,37 @@ class TestRiskBounds:
             "shares": 100, "capital": 500000, "open_positions": 2,
         })
         assert r.status_code == 200
+
+
+class TestPlanEnumBounds:
+    """F-06: plan/costs/risk enums — was free strings silently accepted."""
+
+    async def test_plan_bad_side_422(self):
+        r = await post_json("/api/v1/trades/plan",
+                            {"symbol": "RELIANCE", "side": "banana"})
+        assert r.status_code == 422
+
+    async def test_plan_bad_stop_rule_422(self):
+        r = await post_json("/api/v1/trades/plan",
+                            {"symbol": "RELIANCE", "stop_rule": "bogus"})
+        assert r.status_code == 422
+
+    async def test_plan_bad_interval_422(self):
+        r = await post_json("/api/v1/trades/plan",
+                            {"symbol": "RELIANCE", "interval": "7h"})
+        assert r.status_code == 422
+
+    async def test_costs_bad_side_422(self):
+        r = await post_json("/api/v1/trades/costs",
+                            {"entry": 100, "qty": 1, "side": "banana"})
+        assert r.status_code == 422
+
+    async def test_risk_bad_side_422(self):
+        r = await post_json("/api/v1/risk/check", {
+            "symbol": "RELIANCE", "side": "banana",
+            "entry": 100, "stop": 95, "target": 110,
+        })
+        assert r.status_code == 422
 
 
 class TestPaperManualChecks:
