@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import math
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -125,6 +128,25 @@ def create_app() -> FastAPI:
         logger.exception("Unhandled error on %s %s", request.method, request.url.path)
         return JSONResponse(
             {"detail": "internal server error"}, status_code=500
+        )
+
+    # --- Validation errors: 422 even when input holds inf/nan ---
+    # Default handler embeds raw input; starlette JSONResponse dumps with
+    # allow_nan=False -> ValueError -> false 500. Scrub non-finite to str.
+    def _scrub_nonfinite(obj):
+        if isinstance(obj, float) and not math.isfinite(obj):
+            return str(obj)
+        if isinstance(obj, dict):
+            return {k: _scrub_nonfinite(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_scrub_nonfinite(v) for v in obj]
+        return obj
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_exception(request, exc):
+        return JSONResponse(
+            {"detail": _scrub_nonfinite(jsonable_encoder(exc.errors()))},
+            status_code=422,
         )
 
     # CORS registered last => outermost, so 401/429 bodies still get CORS headers

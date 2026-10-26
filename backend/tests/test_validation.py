@@ -133,6 +133,59 @@ class TestScannerCap:
         assert r.status_code == 200
 
 
+class TestRiskBounds:
+    """F-03: risk/check numeric bounds (was: unbounded list build + inf)."""
+
+    async def test_huge_open_positions_422(self):
+        r = await post_json("/api/v1/risk/check", {
+            "symbol": "RELIANCE", "side": "buy",
+            "entry": 100, "stop": 95, "target": 110,
+            "open_positions": 5_000_000,
+        })
+        assert r.status_code == 422
+
+    async def test_negative_shares_422(self):
+        r = await post_json("/api/v1/risk/check", {
+            "symbol": "RELIANCE", "side": "buy",
+            "entry": 100, "stop": 95, "target": 110,
+            "shares": -1,
+        })
+        assert r.status_code == 422
+
+    async def test_zero_entry_422(self):
+        r = await post_json("/api/v1/risk/check", {
+            "symbol": "RELIANCE", "side": "buy",
+            "entry": 0, "stop": 95, "target": 110,
+        })
+        assert r.status_code == 422
+
+    async def test_negative_trades_today_422(self):
+        r = await post_json("/api/v1/risk/check", {
+            "symbol": "RELIANCE", "side": "buy",
+            "entry": 100, "stop": 95, "target": 110,
+            "trades_today": -1,
+        })
+        assert r.status_code == 422
+
+    async def test_inf_entry_422(self):
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post(
+                "/api/v1/risk/check",
+                content=b'{"symbol":"RELIANCE","side":"buy",'
+                        b'"entry":1e400,"stop":95,"target":110}',
+                headers={"content-type": "application/json"},
+            )
+        assert r.status_code == 422
+
+    async def test_valid_check_still_200(self):
+        r = await post_json("/api/v1/risk/check", {
+            "symbol": "RELIANCE", "side": "buy",
+            "entry": 100, "stop": 95, "target": 110,
+            "shares": 100, "capital": 500000, "open_positions": 2,
+        })
+        assert r.status_code == 200
+
+
 class TestPaperManualChecks:
     async def test_order_qty_zero_400(self):
         async with AsyncClient(transport=transport, base_url="http://test") as c:

@@ -300,14 +300,15 @@ class TestRiskEnforcementAcrossAPI:
                 blocked = [n for n, ch in checks.items() if not ch["passed"]]
                 assert blocked == ["entry_window"], f"unexpected blocks: {blocked}"
 
-    async def test_risk_blocks_missing_data(self):
+    async def test_risk_rejects_zero_stop(self):
+        """stop=0 is invalid input -> 422 at validation layer (was 200 BLOCK).
+        Engine-level BLOCK still covers valid-but-bad numbers (stop > entry)."""
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             r = await c.post("/api/v1/risk/check", json={
                 "symbol": "RELIANCE", "side": "buy",
                 "entry": 100, "stop": 0, "target": 110,
             })
-            assert r.status_code == 200
-            assert r.json()["verdict"] == "BLOCK"
+            assert r.status_code == 422
 
 
 class TestCrossModuleConsistency:
