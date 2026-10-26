@@ -179,6 +179,26 @@ class TestSimulate:
         assert mc1["seed"] == 42
         assert mc2["seed"] == 99
 
+    def test_reach_counts_track_any_touch(self):
+        candles = make_sessions(30)
+        days = split_sessions(candles)
+        full, _ = full_sessions(days, "2026-12-01")
+        pool = build_pool(full)
+        mc = simulate(pool, 1000, 990, 1020, k=10, last=50, replays=200, seed=42)
+        rt = mc["count_reach_target"]
+        rs = mc["count_reach_stop"]
+        assert 0 <= rt <= 200
+        assert 0 <= rs <= 200
+        # first-hit outcome implies that level was reached at least once
+        assert rt >= mc["count_target"]
+        assert rs >= mc["count_stop"]
+        # outcome counts still partition the replays
+        assert (
+            mc["count_target"] + mc["count_stop"] + mc["count_close"] == 200
+        )
+        # reach is never more than every replay
+        assert rt <= 200 and rs <= 200
+
 
 class TestVerdict:
     def test_verdict_is_string(self):

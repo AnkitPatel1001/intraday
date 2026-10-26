@@ -56,8 +56,11 @@ def session_of(request: Request) -> str:
 def _prune() -> None:
     now = time.time()
     expired = [t for t, exp in _sessions.items() if exp <= now]
+    if expired:
+        from app.api.paper import drop_engine
     for t in expired:
         _sessions.pop(t, None)
+        drop_engine(t)  # session gone -> portfolio engine GC'd too
 
 
 @router.post("/session")

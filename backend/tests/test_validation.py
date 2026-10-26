@@ -87,6 +87,13 @@ class TestTimeMachineBounds:
                              "target": 110, "replays": 0})
         assert r.status_code == 422
 
+    async def test_replays_over_cap_422(self):
+        """F-08: >100k replays = ~56s CPU at 1M — cap enforces 422."""
+        r = await post_json("/api/v1/trades/timemachine",
+                            {"symbol": "RELIANCE", "entry": 100, "stop": 95,
+                             "target": 110, "replays": 100001})
+        assert r.status_code == 422
+
     async def test_negative_entry_422(self):
         r = await post_json("/api/v1/trades/timemachine",
                             {"symbol": "RELIANCE", "entry": -1, "stop": 95,
@@ -131,6 +138,90 @@ class TestScannerCap:
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             r = await c.post("/api/v1/scanner/scan", json={"symbols": syms})
         assert r.status_code == 200
+
+
+class TestRiskBounds:
+    """F-03: risk/check numeric bounds (was: unbounded list build + inf)."""
+
+    async def test_huge_open_positions_422(self):
+        r = await post_json("/api/v1/risk/check", {
+            "symbol": "RELIANCE", "side": "buy",
+            "entry": 100, "stop": 95, "target": 110,
+            "open_positions": 5_000_000,
+        })
+        assert r.status_code == 422
+
+    async def test_negative_shares_422(self):
+        r = await post_json("/api/v1/risk/check", {
+            "symbol": "RELIANCE", "side": "buy",
+            "entry": 100, "stop": 95, "target": 110,
+            "shares": -1,
+        })
+        assert r.status_code == 422
+
+    async def test_zero_entry_422(self):
+        r = await post_json("/api/v1/risk/check", {
+            "symbol": "RELIANCE", "side": "buy",
+            "entry": 0, "stop": 95, "target": 110,
+        })
+        assert r.status_code == 422
+
+    async def test_negative_trades_today_422(self):
+        r = await post_json("/api/v1/risk/check", {
+            "symbol": "RELIANCE", "side": "buy",
+            "entry": 100, "stop": 95, "target": 110,
+            "trades_today": -1,
+        })
+        assert r.status_code == 422
+
+    async def test_inf_entry_422(self):
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post(
+                "/api/v1/risk/check",
+                content=b'{"symbol":"RELIANCE","side":"buy",'
+                        b'"entry":1e400,"stop":95,"target":110}',
+                headers={"content-type": "application/json"},
+            )
+        assert r.status_code == 422
+
+    async def test_valid_check_still_200(self):
+        r = await post_json("/api/v1/risk/check", {
+            "symbol": "RELIANCE", "side": "buy",
+            "entry": 100, "stop": 95, "target": 110,
+            "shares": 100, "capital": 500000, "open_positions": 2,
+        })
+        assert r.status_code == 200
+
+
+class TestPlanEnumBounds:
+    """F-06: plan/costs/risk enums — was free strings silently accepted."""
+
+    async def test_plan_bad_side_422(self):
+        r = await post_json("/api/v1/trades/plan",
+                            {"symbol": "RELIANCE", "side": "banana"})
+        assert r.status_code == 422
+
+    async def test_plan_bad_stop_rule_422(self):
+        r = await post_json("/api/v1/trades/plan",
+                            {"symbol": "RELIANCE", "stop_rule": "bogus"})
+        assert r.status_code == 422
+
+    async def test_plan_bad_interval_422(self):
+        r = await post_json("/api/v1/trades/plan",
+                            {"symbol": "RELIANCE", "interval": "7h"})
+        assert r.status_code == 422
+
+    async def test_costs_bad_side_422(self):
+        r = await post_json("/api/v1/trades/costs",
+                            {"entry": 100, "qty": 1, "side": "banana"})
+        assert r.status_code == 422
+
+    async def test_risk_bad_side_422(self):
+        r = await post_json("/api/v1/risk/check", {
+            "symbol": "RELIANCE", "side": "banana",
+            "entry": 100, "stop": 95, "target": 110,
+        })
+        assert r.status_code == 422
 
 
 class TestPaperManualChecks:

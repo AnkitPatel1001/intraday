@@ -201,6 +201,12 @@ export interface TimeMachineMC {
   r_at_target: number | null;
   bars_left: number;
   seed: number;
+  replays?: number;
+  count_target?: number;
+  count_stop?: number;
+  count_close?: number;
+  count_reach_target?: number;
+  count_reach_stop?: number;
   until?: string;
   window?: number;
   pool_sessions: number;
@@ -259,6 +265,7 @@ export interface OrderRequest {
   side: Side;
   qty: number;
   order_type: "market" | "limit";
+  price?: number;
 }
 
 export interface Order {
@@ -271,6 +278,7 @@ export interface Order {
   fees: number;
   slippage?: number;
   tag?: string;
+  limit_price?: number | null;
 }
 
 export interface OrderResponse {

@@ -118,10 +118,14 @@ def simulate(
     closes: list[float] = []
     paths: list[list[float]] = []
     Rs: list[float] = []
+    reach_target = 0
+    reach_stop = 0
 
     for n in range(replays):
         p = entry
         outcome = None
+        touched_t = False
+        touched_s = False
         keep = n < SAMPLE_PATHS
         path = [entry]
         for i in range(k + 1, last + 1):
@@ -130,6 +134,18 @@ def simulate(
                 slot_choices = pool[i] if pool[i] else [(1, 1, 1, 1)]
             o_r, h_r, l_r, c_r = choice(slot_choices)
             hi, lo, cl = p * h_r, p * l_r, p * c_r
+            # Reach = any touch of the level during the session, even after
+            # the first-hit outcome is decided (user-facing "price went to X").
+            if long:
+                if hi >= target:
+                    touched_t = True
+                if lo <= stop:
+                    touched_s = True
+            else:
+                if lo <= target:
+                    touched_t = True
+                if hi >= stop:
+                    touched_s = True
             if outcome is None:
                 if long:
                     if lo <= stop:
@@ -144,6 +160,8 @@ def simulate(
             p = cl
             if keep:
                 path.append(round(p, 2))
+        reach_target += 1 if touched_t else 0
+        reach_stop += 1 if touched_s else 0
         final_outcome = outcome or "close"
         outcomes.append(final_outcome)
         closes.append(p)
@@ -192,6 +210,9 @@ def simulate(
     return {
         "replays": replays, "seed": seed, "window": window,
         "bars_left": last - k,
+        "count_target": cnt["target"], "count_stop": cnt["stop"],
+        "count_close": cnt["close"],
+        "count_reach_target": reach_target, "count_reach_stop": reach_stop,
         "p_target": round(cnt["target"] / replays, 4),
         "p_stop": round(cnt["stop"] / replays, 4),
         "p_neither": round(cnt["close"] / replays, 4),

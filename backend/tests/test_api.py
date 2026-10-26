@@ -219,6 +219,22 @@ class TestAnalytics:
             assert r.status_code == 200
             assert "text/csv" in r.headers["content-type"]
 
+    async def test_export_sanitizes_tag(self):
+        """F-05: malicious tag must not emit raw CSV formula/newline."""
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post("/api/v1/paper/order", json={
+                "symbol": "RELIANCE", "side": "buy", "qty": 1,
+                "order_type": "market", "tag": '=1+1,x\nEVIL"TAG',
+            })
+            assert r.status_code == 200
+            exp = await c.get("/api/v1/analytics/export")
+            assert exp.status_code == 200
+            body = exp.text
+        assert "'=1+1" in body          # formula neutralized by apostrophe
+        assert '""TAG"' in body         # embedded quote doubled, cell quoted
+        assert not any(line.startswith("=")
+                       for line in body.splitlines())  # no line opens with =
+
 
 class TestBacktest:
     async def test_run(self):

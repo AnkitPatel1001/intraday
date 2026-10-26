@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -27,14 +28,14 @@ _SIM_SEMAPHORE = asyncio.Semaphore(2)
 
 class PlanRequest(BaseModel):
     symbol: str
-    side: str = "buy"
+    side: Literal["buy", "sell"] = "buy"
     entry_bar: int = 5
-    stop_rule: str = "or_mid"
+    stop_rule: Literal["or_mid", "or_low", "or_high", "pct"] = "or_mid"
     target_r: float = Field(2.0, gt=0, le=50)
     or_minutes: int = Field(15, ge=5, le=60)
     capital: float = Field(500000, gt=0, le=1e12)
     risk_pct: float = Field(1.0, gt=0, le=100)
-    interval: str = "5m"
+    interval: Literal["1m", "5m", "15m", "1d"] = "5m"
 
 
 class TimeMachineRequest(BaseModel):
@@ -49,14 +50,14 @@ class TimeMachineRequest(BaseModel):
     setup: str = "orb"
     or_minutes: int = Field(15, ge=5, le=60)
     stop_rule: str = "auto"
-    replays: int = Field(10000, ge=1, le=1_000_000)
+    replays: int = Field(10000, ge=1, le=100_000)
     seed: int = 19
 
 
 class CostRequest(BaseModel):
     entry: float = Field(..., gt=0, le=1e9)
     qty: int = Field(..., gt=0, le=1_000_000)
-    side: str = "buy"
+    side: Literal["buy", "sell"] = "buy"
 
 
 class SizeRequest(BaseModel):

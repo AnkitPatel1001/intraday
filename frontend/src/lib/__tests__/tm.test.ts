@@ -1,5 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { deriveLevels, validLevels } from "../tm";
+import { autoOdds, deriveLevels, validLevels } from "../tm";
+import type { TimeMachineMC } from "../types";
+
+function mc(partial: Partial<TimeMachineMC>): TimeMachineMC {
+  return {
+    p_target: 0,
+    p_stop: 0,
+    p_neither: 0,
+    p_green: 0,
+    median_close: 0,
+    avg_R: null,
+    r_at_target: null,
+    bars_left: 70,
+    seed: 19,
+    pool_sessions: 38,
+    ...partial,
+  };
+}
 
 describe("deriveLevels", () => {
   it("buy: stop 0.5% below, target 2R above the live price", () => {
@@ -47,5 +64,90 @@ describe("validLevels", () => {
   it("rejects empty or zero values", () => {
     expect(validLevels("", "1", "2")).toBe(false);
     expect(validLevels("0", "1", "2")).toBe(false);
+  });
+});
+
+describe("autoOdds", () => {
+  const buyLevels = { entry: 100, stop: 99, target: 102 };
+
+  it("buy: exact counts, per-share and total ₹ amounts, EV", () => {
+    const o = autoOdds(
+      mc({
+        replays: 10000,
+        count_target: 3000,
+        count_stop: 2500,
+        count_close: 4500,
+        count_reach_target: 8000,
+        count_reach_stop: 6500,
+        p_target: 0.3,
+        p_stop: 0.25,
+        p_neither: 0.45,
+      }),
+      buyLevels,
+      "buy",
+      10
+    );
+    expect(o.targetCount).toBe(3000);
+    expect(o.stopCount).toBe(2500);
+    expect(o.neitherCount).toBe(4500);
+    expect(o.reachTargetCount).toBe(8000); // any touch, overlaps allowed
+    expect(o.reachStopCount).toBe(6500);
+    expect(o.reachTargetCount).toBeGreaterThanOrEqual(o.targetCount);
+    expect(o.reachStopCount).toBeGreaterThanOrEqual(o.stopCount);
+    expect(o.rewardPerShare).toBe(2); // target - entry
+    expect(o.riskPerShare).toBe(1); // entry - stop
+    expect(o.rewardTotal).toBe(20); // × 10 qty
+    expect(o.riskTotal).toBe(10);
+    expect(o.evPerShare).toBe(0.35); // 0.3×2 − 0.25×1
+    expect(o.evTotal).toBe(3.5);
+  });
+
+  it("sell: reward = entry−target, risk = stop−entry", () => {
+    const o = autoOdds(
+      mc({
+        replays: 10000,
+        count_target: 4000,
+        count_stop: 2000,
+        count_close: 4000,
+        p_target: 0.4,
+        p_stop: 0.2,
+        p_neither: 0.4,
+      }),
+      { entry: 100, stop: 101, target: 98 },
+      "sell",
+      5
+    );
+    expect(o.rewardPerShare).toBe(2); // entry - target
+    expect(o.riskPerShare).toBe(1); // stop - entry
+    expect(o.rewardTotal).toBe(10);
+    expect(o.riskTotal).toBe(5);
+    expect(o.evPerShare).toBe(0.6); // 0.4×2 − 0.2×1
+  });
+
+  it("falls back to p × replays when raw counts are missing", () => {
+    const o = autoOdds(
+      mc({ p_target: 0.3333, p_stop: 0.25, p_neither: 0.4167 }),
+      buyLevels,
+      "buy",
+      1
+    );
+    expect(o.replays).toBe(10000);
+    expect(o.targetCount).toBe(3333);
+    expect(o.stopCount).toBe(2500);
+    expect(o.neitherCount).toBe(4167);
+    // reach missing -> conservative first-hit lower bound
+    expect(o.reachTargetCount).toBe(3333);
+    expect(o.reachStopCount).toBe(2500);
+  });
+
+  it("treats non-positive qty as 1", () => {
+    const o = autoOdds(
+      mc({ p_target: 1, p_stop: 0, p_neither: 0, count_target: 10 }),
+      buyLevels,
+      "buy",
+      0
+    );
+    expect(o.rewardTotal).toBe(2);
+    expect(o.evTotal).toBe(2);
   });
 });

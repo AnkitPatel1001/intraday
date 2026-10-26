@@ -379,3 +379,30 @@ class TestP21ServerHeader:
         async with AsyncClient(transport=transport, base_url="http://t") as c:
             r = await c.get("/health")
         assert "server" not in {k.lower() for k in r.headers}
+
+
+class TestF09EngineLifecycle:
+    def test_expired_session_prunes_portfolio_engine(self):
+        """Session expiry must GC the paper engine (was: leak forever)."""
+        import time
+
+        from app.api import auth, paper
+
+        token, _ttl = auth.create_session()
+        paper.get_engine(token)
+        assert token in paper._engines
+
+        auth._sessions[token] = time.time() - 1  # force-expire
+        auth.validate_session(token)             # triggers prune
+
+        assert token not in auth._sessions
+        assert token not in paper._engines
+
+    def test_live_session_keeps_engine(self):
+        from app.api import auth, paper
+
+        token, _ttl = auth.create_session()
+        paper.get_engine(token)
+        assert auth.validate_session(token) is True
+        assert token in paper._engines
+        auth.invalidate_session(token)  # cleanup
