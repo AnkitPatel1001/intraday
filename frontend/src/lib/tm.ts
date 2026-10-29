@@ -42,6 +42,15 @@ export function deriveLevels(ltp: number, side: "buy" | "sell"): Levels {
     : { entry, stop: round2(entry + risk), target: round2(entry - reward) };
 }
 
+// Parse an entry-bar text input, defaulting only when it's genuinely not a
+// number — `Number(x) || 5` would silently override a legitimate 0 (the
+// first bar of the session) with the default, since 0 is JS-falsy.
+export function parseEntryBar(raw: string, fallback = 5): number {
+  if (raw.trim() === "") return fallback; // Number("") is 0, not NaN
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 export function validLevels(entry: string, stop: string, target: string): boolean {
   const e = Number(entry);
   const s = Number(stop);

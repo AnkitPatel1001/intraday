@@ -68,6 +68,4 @@ def series_5m():
     p = SyntheticProvider()
     start = datetime.date(2026, 9, 1)
     end = datetime.date(2026, 10, 24)
-    return asyncio.get_event_loop().run_until_complete(
-        p.get_bars("RELIANCE", "5m", start, end)
-    )
+    return asyncio.run(p.get_bars("RELIANCE", "5m", start, end))

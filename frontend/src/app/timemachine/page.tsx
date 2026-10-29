@@ -2,9 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api";
-import type { Quote, TimeMachineRequest, TimeMachineResponse } from "@/lib/types";
+import type {
+  AutoTradeResponse,
+  Quote,
+  TimeMachineRequest,
+  TimeMachineResponse,
+} from "@/lib/types";
 import { formatINR, formatINRSigned, formatNumber, formatPct } from "@/lib/format";
-import { deriveLevels, autoOdds, type Levels } from "@/lib/tm";
+import { deriveLevels, autoOdds, parseEntryBar, type Levels } from "@/lib/tm";
 import FreshnessBadge from "@/components/FreshnessBadge";
 
 export default function TimeMachinePage() {
@@ -33,6 +38,13 @@ export default function TimeMachinePage() {
   const [autoErr, setAutoErr] = useState<string | null>(null);
   const [autoRes, setAutoRes] = useState<TimeMachineResponse | null>(null);
   const [autoLevels, setAutoLevels] = useState<Levels | null>(null);
+
+  // Auto-trade: time-machine-gated automatic paper buy/sell.
+  const [minEdge, setMinEdge] = useState("0.05");
+  const [autoExecute, setAutoExecute] = useState(true);
+  const [tradeRunning, setTradeRunning] = useState(false);
+  const [tradeErr, setTradeErr] = useState<string | null>(null);
+  const [tradeRes, setTradeRes] = useState<AutoTradeResponse | null>(null);
 
   const fillFromLtp = async (sym: string, why: "auto" | "manual") => {
     const seq = ++fetchSeq.current;
@@ -89,7 +101,7 @@ export default function TimeMachinePage() {
         entry: Number(entry),
         stop: Number(stop),
         target: Number(target),
-        entry_bar: Number(entryBar) || 5,
+        entry_bar: parseEntryBar(entryBar),
         replays: Math.min(100000, Math.max(1, Number(replays) || 10000)),
         seed: Number(seed) || 19,
       };
@@ -133,7 +145,7 @@ export default function TimeMachinePage() {
           entry: lv.entry,
           stop: lv.stop,
           target: lv.target,
-          entry_bar: Number(entryBar) || 5,
+          entry_bar: parseEntryBar(entryBar),
           replays: 10000,
           seed: 19,
         }
@@ -146,6 +158,34 @@ export default function TimeMachinePage() {
       setAutoLevels(null);
     } finally {
       setAutoRunning(false);
+    }
+  };
+
+  const runAutoTrade = async () => {
+    const sym = symbol.trim().toUpperCase();
+    if (!sym) {
+      setTradeErr("enter a symbol first");
+      return;
+    }
+    setTradeRunning(true);
+    setTradeErr(null);
+    try {
+      const res = await apiPost<AutoTradeResponse>("/api/v1/trades/auto", {
+        symbol: sym,
+        side,
+        entry_bar: parseEntryBar(entryBar),
+        qty: Number(autoQty) > 0 ? Number(autoQty) : undefined,
+        min_edge: Number(minEdge),
+        execute: autoExecute,
+        replays: 10000,
+        seed: 19,
+      });
+      setTradeRes(res);
+    } catch (err) {
+      setTradeErr(err instanceof Error ? err.message : String(err));
+      setTradeRes(null);
+    } finally {
+      setTradeRunning(false);
     }
   };
 
@@ -701,6 +741,132 @@ export default function TimeMachinePage() {
               </span>
             </div>
           </>
+        ) : null}
+      </section>
+
+      <section className="card p-5 space-y-4 border-amber-500/30">
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div>
+            <div className="label-caps">Auto-trade — paper only</div>
+            <p className="text-[11px] text-gray-600 mt-1 leading-relaxed">
+              Risk-checks the plan, replays it through the Time Machine, and
+              — only when the risk check PASSes and the target-vs-stop edge
+              clears the threshold below — places a real paper order in your
+              own portfolio. No live broker is ever touched.
+            </p>
+          </div>
+          <span className="px-2 py-1 text-[10px] font-bold tracking-wider bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded">
+            NO REAL MONEY
+          </span>
+        </div>
+
+        <div className="flex items-end gap-3 flex-wrap">
+          <div>
+            <label className="label-caps block mb-1.5">Qty override</label>
+            <input
+              type="number"
+              min={1}
+              className="input-dark num w-28"
+              value={autoQty}
+              onChange={(e) => setAutoQty(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="label-caps block mb-1.5">Min edge</label>
+            <select
+              className="input-dark w-40"
+              value={minEdge}
+              onChange={(e) => setMinEdge(e.target.value)}
+            >
+              <option value="0">Any edge toward target</option>
+              <option value="0.05">Leans (≥ 5 pts)</option>
+              <option value="0.15">Strong (≥ 15 pts)</option>
+            </select>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-gray-400 pb-2">
+            <input
+              type="checkbox"
+              checked={autoExecute}
+              onChange={(e) => setAutoExecute(e.target.checked)}
+            />
+            Place the paper order (uncheck to preview only)
+          </label>
+          <button
+            className="btn-primary"
+            onClick={runAutoTrade}
+            disabled={tradeRunning}
+          >
+            {tradeRunning
+              ? "Checking…"
+              : autoExecute
+              ? "Check & auto-trade"
+              : "Preview decision"}
+          </button>
+        </div>
+
+        {tradeErr ? (
+          <div className="text-xs text-red-400 num break-all border border-red-500/30 rounded p-2 bg-red-500/5">
+            {tradeErr}
+          </div>
+        ) : null}
+
+        {tradeRes ? (
+          <div className="space-y-3">
+            <div
+              className={`flex items-center gap-3 flex-wrap px-4 py-3 rounded border text-sm font-bold num ${
+                tradeRes.decision.action === "enter"
+                  ? "text-green border-green/40 bg-green/10"
+                  : "text-amber-300 border-amber-500/40 bg-amber-500/10"
+              }`}
+            >
+              <span>
+                {tradeRes.decision.action === "enter" ? "ENTER" : "SKIP"}
+                {tradeRes.decision.edge != null
+                  ? ` · edge ${tradeRes.decision.edge >= 0 ? "+" : ""}${(
+                      tradeRes.decision.edge * 100
+                    ).toFixed(1)} pts`
+                  : ""}
+              </span>
+              <span className="font-normal text-xs text-gray-300">
+                {tradeRes.decision.reason}
+              </span>
+            </div>
+
+            {tradeRes.risk.verdict === "BLOCK" ? (
+              <div className="text-[11px] text-red-400 border border-red-500/30 bg-red-500/5 rounded p-2">
+                Risk BLOCK: {tradeRes.risk.reasons.join("; ") || "see checks"}
+              </div>
+            ) : null}
+            {tradeRes.time_machine_error ? (
+              <div className="text-[11px] text-amber-300 border border-amber-500/40 bg-amber-500/10 rounded p-2">
+                Time machine: {tradeRes.time_machine_error}
+              </div>
+            ) : null}
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <Mini label="Entry" v={formatINR(tradeRes.plan.entry)} />
+              <Mini label="Stop" v={formatINR(tradeRes.plan.stop)} tone="red" />
+              <Mini label="Target" v={formatINR(tradeRes.plan.target)} tone="green" />
+              <Mini label="Shares" v={formatNumber(tradeRes.plan.shares, 0)} />
+            </div>
+
+            {tradeRes.order ? (
+              <div className="text-sm text-green border border-green/30 bg-green/5 rounded p-3 num">
+                Order {tradeRes.order.status}: {tradeRes.order.qty} ×{" "}
+                {tradeRes.symbol} @ {formatINR(tradeRes.order.fill_price ?? 0)}.
+                Portfolio cash now {formatINR(tradeRes.portfolio.cash)}.
+              </div>
+            ) : tradeRes.order_error ? (
+              <div className="text-sm text-amber-300 border border-amber-500/40 bg-amber-500/10 rounded p-3">
+                Decided to enter, but the order was not placed:{" "}
+                {tradeRes.order_error}
+              </div>
+            ) : (
+              <div className="text-[11px] text-gray-600">
+                No order placed{autoExecute ? "" : " (preview only)"}.
+              </div>
+            )}
+          </div>
         ) : null}
       </section>
     </div>

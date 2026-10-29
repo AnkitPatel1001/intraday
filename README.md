@@ -56,6 +56,7 @@ skills/           Adapted Claude skills (Indian market)
 | **Trade Planner** | Entry/stop/target, R:R, Indian costs (STT, brokerage, GST, stamp duty) |
 | **Risk Engine** | PASS/BLOCK vs limits: daily loss, position count, R:R, entry window |
 | **Paper Trading** | Simulated fills, slippage, fees, portfolio, audit log |
+| **Auto-Trade** | Time-machine-gated automatic buy/sell — paper only, see below |
 | **Backtesting** | ORB strategy, no look-ahead, realistic costs, equity curve |
 | **Analytics** | Win rate, profit factor, P&L, CSV export |
 
@@ -170,6 +171,7 @@ GET  /api/v1/market/bars/{symbol}?interval=5m&days=30
 POST /api/v1/scanner/scan
 POST /api/v1/trades/plan
 POST /api/v1/trades/timemachine
+POST /api/v1/trades/auto         # time-machine-gated automatic buy/sell (paper)
 POST /api/v1/trades/costs
 POST /api/v1/risk/check
 POST /api/v1/paper/order
@@ -177,6 +179,23 @@ GET  /api/v1/paper/portfolio
 POST /api/v1/backtest/run
 GET  /api/v1/analytics/performance
 ```
+
+### Auto-Trade (`POST /api/v1/trades/auto`)
+
+A strategy that closes the loop between Time Machine and Paper Trading:
+given a symbol and side, it derives entry/stop/target from the live quote
+(skill defaults: 0.5% stop distance, 2R target), risk-checks the plan
+against the account's limits and current portfolio, then replays it
+through the Monte Carlo + historical rule engine on the symbol's own past
+sessions. **A paper order is placed automatically — in the caller's own
+session portfolio — only when the risk check PASSes *and* the replay's
+target-vs-stop edge is at or above `min_edge`** (default 0.05, matching the
+Time Machine verdict's own "leans" threshold; 0.15 for "strongly"). Pass
+`execute: false` to see the decision (and the full plan/risk/Monte Carlo
+detail) without ever placing an order. Like every other execution path in
+this app, it is **paper-only** — it places orders through the same
+in-memory paper engine as `POST /api/v1/paper/order` and never calls a
+live broker.
 
 All `/api/v1/*` routes except `auth`, `market`, and `scanner/presets` require a
 session token (401 without one when `AUTH_ENABLED=true`). Each token gets its
@@ -187,11 +206,11 @@ own isolated paper-trading portfolio.
 ```bash
 cd backend
 python -m pytest tests/ -v
-# 377 passed, 1 skipped (market-open guard; 378 passed when the market is closed)
+# 415 passed
 
 cd ../frontend
 npm test
-# 45 passed (vitest)
+# 52 passed (vitest)
 ```
 
 All tests run offline on synthetic data. No network calls. CI enforces a

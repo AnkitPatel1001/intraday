@@ -237,6 +237,67 @@ export interface TimeMachineResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Automatic buy/sell (time-machine-gated, paper only)
+// ---------------------------------------------------------------------------
+
+export interface AutoTradeRequest {
+  symbol: string;
+  side: Side;
+  entry_bar?: number;
+  stop_pct?: number;
+  target_r?: number;
+  capital?: number;
+  risk_pct?: number;
+  replays?: number;
+  seed?: number;
+  min_edge?: number;
+  qty?: number;
+  execute?: boolean;
+  tag?: string;
+}
+
+export interface AutoTradeDecision {
+  action: "enter" | "skip";
+  edge: number | null;
+  reason: string;
+}
+
+export interface AutoTradePlan {
+  entry: number;
+  stop: number;
+  target: number;
+  risk_per_share: number;
+  reward_per_share: number;
+  target_r: number;
+  shares: number;
+  costs: CostBreakdown;
+}
+
+export interface AutoTradeTimeMachine {
+  verdict: string;
+  verdict_notes: string[];
+  mc: TimeMachineMC;
+  history: TimeMachineHistory;
+  plan_date: string;
+}
+
+export interface AutoTradeResponse {
+  label: string;
+  symbol: string;
+  side: Side;
+  live_price: number;
+  freshness: string;
+  plan: AutoTradePlan;
+  risk: RiskResponse;
+  time_machine: AutoTradeTimeMachine | null;
+  time_machine_error: string | null;
+  decision: AutoTradeDecision;
+  order: Order | null;
+  order_error: string | null;
+  portfolio: Portfolio;
+}
+
+// ---------------------------------------------------------------------------
 // Paper trading
 // ---------------------------------------------------------------------------
 

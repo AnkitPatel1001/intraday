@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { autoOdds, deriveLevels, validLevels } from "../tm";
+import { autoOdds, deriveLevels, parseEntryBar, validLevels } from "../tm";
 import type { TimeMachineMC } from "../types";
 
 function mc(partial: Partial<TimeMachineMC>): TimeMachineMC {
@@ -45,6 +45,23 @@ describe("deriveLevels", () => {
   it("rejects non-positive prices", () => {
     expect(() => deriveLevels(Number.NaN, "buy")).toThrow();
     expect(() => deriveLevels(-1, "buy")).toThrow();
+  });
+});
+
+describe("parseEntryBar", () => {
+  it("keeps a legitimate 0 — the first bar of the session", () => {
+    // `Number(x) || 5` would silently turn this into 5, since 0 is falsy.
+    expect(parseEntryBar("0")).toBe(0);
+  });
+
+  it("parses a normal value", () => {
+    expect(parseEntryBar("10")).toBe(10);
+  });
+
+  it("falls back to the default on empty or non-numeric input", () => {
+    expect(parseEntryBar("")).toBe(5);
+    expect(parseEntryBar("abc")).toBe(5);
+    expect(parseEntryBar("abc", 7)).toBe(7);
   });
 });
 

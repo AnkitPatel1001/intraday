@@ -6,7 +6,7 @@ import datetime
 from dataclasses import dataclass, field
 from typing import Optional
 
-from app.core.calendar import SESSION_BARS, BAR_MIN, OPEN_MIN, slot_time
+from app.core.calendar import SESSION_BARS, BAR_MIN, OPEN_MIN, bar_slot, slot_time
 from app.core.primitives import BarSeries
 from app.engine.indicators import atr as atr_fn, rsi as rsi_fn, ema as ema_fn, vwap as vwap_fn
 
@@ -42,6 +42,7 @@ class TradePlan:
     costs: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     label: str = "RESEARCH PLAN — not a buy/sell instruction"
+    date: str = ""
 
 
 def estimate_costs(entry: float, qty: int, side: str = "buy") -> dict:
@@ -72,8 +73,15 @@ def estimate_costs(entry: float, qty: int, side: str = "buy") -> dict:
 
 def position_size(
     capital: float, risk_per_trade_pct: float, entry: float, stop: float,
+    max_position_pct: Optional[float] = None,
 ) -> dict:
-    """Whole-share position sizing from capital and risk limit."""
+    """Whole-share position sizing from capital and risk limit.
+
+    `max_position_pct`, if given, also caps the position so its cost never
+    exceeds that percent of capital — without it, a tight stop (relative to
+    risk_per_trade_pct) inflates the risk-budget share count past the plain
+    capital limit, silently sizing a position close to 100% of capital.
+    """
     risk_amount = capital * risk_per_trade_pct / 100
     risk_per_share = abs(entry - stop)
     if risk_per_share <= 0:
@@ -83,6 +91,11 @@ def position_size(
     if cost > capital:
         shares = int(capital / entry)
         cost = shares * entry
+    if max_position_pct is not None:
+        max_cost = capital * max_position_pct / 100
+        if cost > max_cost:
+            shares = int(max_cost / entry) if entry > 0 else 0
+            cost = shares * entry
     actual_risk = shares * risk_per_share
     return {
         "shares": shares,
@@ -91,6 +104,41 @@ def position_size(
         "cost": round(cost, 2),
         "pct_of_capital": round(100 * cost / capital, 2) if capital else 0,
     }
+
+
+def _slots_by_date(candles: list) -> dict[datetime.date, dict[int, object]]:
+    """{date: {bar_slot: candle}}, keyed by time-of-day via bar_slot() — not
+    by list position. A day with early gaps then can't be mis-indexed: a
+    missing slot is simply absent from the dict instead of shifting every
+    later bar one position to the left."""
+    out: dict[datetime.date, dict[int, object]] = {}
+    for c in candles:
+        slot = bar_slot(c.ts.time())
+        if slot is None:
+            continue
+        out.setdefault(c.ts.date(), {})[slot] = c
+    return out
+
+
+def _pick_date_with_bars(
+    by_date: dict[datetime.date, dict[int, object]], entry_bar: int,
+) -> datetime.date:
+    """Most recent date with bars 0..entry_bar ALL present (by slot)."""
+    needed = range(entry_bar + 1)
+    for d in sorted(by_date, reverse=True):
+        if all(i in by_date[d] for i in needed):
+            return d
+    raise ValueError(f"no session has bars 0..{entry_bar} complete")
+
+
+def latest_entry_date(candles: list, entry_bar: int) -> datetime.date:
+    """Most recent date in `candles` whose session has bars 0..entry_bar all
+    present (matched by time-of-day, not position in the flat list — the
+    old approach indexed straight into the whole fetch window, which always
+    landed on the OLDEST day instead of the most recent usable session, and
+    additionally mis-indexed any day with early gaps).
+    """
+    return _pick_date_with_bars(_slots_by_date(candles), entry_bar)
 
 
 def build_plan(
@@ -110,19 +158,18 @@ def build_plan(
     if entry_bar < n or entry_bar >= SESSION_BARS:
         raise ValueError(f"entry_bar must be {n}..{SESSION_BARS-1}")
 
-    candles = series.candles
-    # Get the entry day's candles
-    entry_date = candles[entry_bar].ts.date()
-    day_candles = [c for c in candles if c.ts.date() == entry_date]
-    if len(day_candles) < entry_bar + 1:
-        raise ValueError("insufficient bars for the entry day")
+    # Get the most recent day that has bars 0..entry_bar all present (not
+    # the oldest one in the fetch window, and not mis-indexed by a gap).
+    by_date = _slots_by_date(series.candles)
+    entry_date = _pick_date_with_bars(by_date, entry_bar)
+    slots = by_date[entry_date]
 
     # Opening range
-    or_bars = day_candles[:n]
+    or_bars = [slots[i] for i in range(n)]
     or_high = max(c.high for c in or_bars)
     or_low = min(c.low for c in or_bars)
 
-    entry_candle = day_candles[entry_bar]
+    entry_candle = slots[entry_bar]
     entry = entry_candle.close
 
     if stop_rule == "or_mid":
@@ -172,4 +219,5 @@ def build_plan(
         max_holding_bars=max_hold,
         costs=costs,
         warnings=warnings,
+        date=entry_date.isoformat(),
     )
